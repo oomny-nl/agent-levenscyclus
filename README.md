@@ -12,6 +12,10 @@ logboek.
 Het scenario speelt bij de fictieve gemeente Lindevoort. Alle namen, dossiers en inhoud zijn
 verzonnen.
 
+![Demo-opname: joiner, prompt-injectie geweigerd, mover, leaver en verlopen agent, met het geketende logboek als bewijs](docs/beeld/demo.gif)
+
+De opname toont `make demo`: vijf scenario's tegen de echte keten en daarna het logboek als bewijs. Opnieuw opnemen: `make opname` (vereist [VHS](https://github.com/charmbracelet/vhs) en ffmpeg).
+
 ## Wat dit bewijst
 
 - **Eigenaarschap is afdwingbaar.** Een agent heeft altijd een menselijke eigenaar (geen agent als

@@ -1,4 +1,4 @@
-.PHONY: demo up speel integratie test lint model check down
+.PHONY: demo up speel opname integratie test lint model check down
 
 COMPOSE := docker compose --progress quiet
 # `down` ook voor de profielcontainers (demo, tests), anders houden die de volumes vast.
@@ -21,6 +21,13 @@ up: .env
 ## speel: speel de scenario's af tegen de draaiende keten
 speel:
 	@$(COMPOSE) run --rm demo
+
+## opname: neem de demo op met VHS (demo/demo.tape) en maak er een gif van voor de README
+opname: up
+	vhs demo/demo.tape
+	timeout 600 ffmpeg -nostdin -y -loglevel error -i docs/beeld/demo.mp4 \
+		-vf "fps=6,scale=1100:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=24:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle" \
+		docs/beeld/demo.gif
 
 PYTEST := pytest -m integratie -p no:cacheprovider
 

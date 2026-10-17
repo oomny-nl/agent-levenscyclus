@@ -11,6 +11,10 @@ everything that happens to it is recorded in one verifiable log.
 The scenario takes place in the fictional municipality of Lindevoort. All names, case files and
 content are made up. The code, logs and identifiers are in Dutch.
 
+![Demo recording: joiner, prompt injection refused, mover, leaver and expired agent, with the chained log as evidence](docs/beeld/demo.gif)
+
+The recording shows `make demo`: five scenarios against the real stack, followed by the log as evidence. Record it again with `make opname` (requires [VHS](https://github.com/charmbracelet/vhs) and ffmpeg).
+
 ## What this proves
 
 - **Ownership is enforceable.** An agent always has a human owner (never another agent). Without
