@@ -106,3 +106,26 @@ def test_ankerfout_blokkeert_appends(tmp_path: Path) -> None:
     # Ook als het anker weer schrijfbaar is, blijft het register dicht tot een herstart.
     with pytest.raises(LogboekFout, match="geblokkeerd"):
         opslag.log({"soort": "levenscyclus", "gebeurtenis": "na herstel"}, NU)
+
+
+def test_aangehangen_record_blokkeert_volgende_append(tmp_path: Path) -> None:
+    # Tijdens bedrijf: een correct gehasht record buiten het register om in SQLite gezet. De
+    # volgende legitieme append mag daar niet op voortbouwen en het zo alsnog laten verankeren.
+    opslag = _opslag(tmp_path)
+    _vul(opslag)
+    _hang_record_aan(tmp_path)
+    with pytest.raises(LogboekFout, match="ketenkop"):
+        opslag.log({"soort": "levenscyclus", "gebeurtenis": "legitiem"}, NU)
+    assert opslag.geblokkeerd
+    assert len(lees_anker(tmp_path / "anker" / "anker.log") or []) == 3
+
+
+def test_gat_in_anker_afgekeurd(tmp_path: Path) -> None:
+    # Voortgebouwd op een tussengevoegd record: het anker mist dan een nummer vóór zijn laatste.
+    opslag = _opslag(tmp_path)
+    _vul(opslag, 4)
+    anker = tmp_path / "anker" / "anker.log"
+    regels = anker.read_text(encoding="utf-8").splitlines()
+    anker.write_text("\n".join(regels[:2] + regels[3:]) + "\n", encoding="utf-8")
+    uitkomst = controleer_tegen_anker(opslag.logboek(), lees_anker(anker))
+    assert (uitkomst.intact, uitkomst.fout_record) == (False, 3)

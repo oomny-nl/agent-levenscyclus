@@ -88,6 +88,15 @@ def _ankerafwijking(
             )
         if hashes[nr] != h:
             return Ketencontrole(False, f"record {nr} wijkt af van het anker", nr)
+    # Elk record tot en met het laatste anker moet zelf verankerd zijn: een tussengevoegd,
+    # correct gehasht record waar later een legitiem record op voortbouwde, valt anders weg.
+    verankerd = {nr for nr, _ in anker}
+    laatste = anker[-1][0]
+    for record in records:
+        if record["nr"] <= laatste and record["nr"] not in verankerd:
+            nr = record["nr"]
+            reden = f"record {nr} staat vóór het laatste anker maar is niet verankerd"
+            return Ketencontrole(False, reden, nr)
     return None
 
 

@@ -65,6 +65,9 @@ class Opslag:
         self.basis_url = basis_url
         self.geblokkeerd: str | None = None
         self._wachtrij: list[tuple[int, str]] = []
+        laatste_anker = lees_anker(anker) if anker is not None else None
+        # Kop van de keten volgens het anker: het laatste record dat dit register zelf verankerde.
+        self._kop: tuple[int, str] | None = laatste_anker[-1] if laatste_anker else None
 
     @contextmanager
     def transactie(self) -> Generator[None]:
@@ -216,7 +219,10 @@ class Opslag:
         if self.geblokkeerd:
             raise LogboekFout(f"logboek geblokkeerd na ankerfout: {self.geblokkeerd}")
         record = {"tijd": iso(tijd), **record}
-        laatste = self._db.execute("SELECT hash FROM logboek ORDER BY nr DESC LIMIT 1").fetchone()
+        laatste = self._db.execute(
+            "SELECT nr, hash FROM logboek ORDER BY nr DESC LIMIT 1"
+        ).fetchone()
+        self._controleer_kop((laatste["nr"], laatste["hash"]) if laatste else None)
         vorige = laatste["hash"] if laatste else GENESIS
         h = ketenhash(vorige, record)
         cursor = self._db.execute(
@@ -229,16 +235,33 @@ class Opslag:
             self._veranker_wachtrij()
         return {"nr": nr, **record, "vorige": vorige, "hash": h}
 
+    def _controleer_kop(self, laatste: tuple[int, str] | None) -> None:
+        """Weiger een append als de database een ander laatste record heeft dan verwacht.
+
+        Verwacht is het laatst gelogde record van de lopende transactie, anders het laatst
+        verankerde. Een record dat buiten het register om is toegevoegd, blokkeert het logboek.
+        """
+        verwacht = self._wachtrij[-1] if self._wachtrij else self._kop
+        if laatste != verwacht:
+            self.geblokkeerd = f"ketenkop {laatste} wijkt af van het verwachte record {verwacht}"
+            raise LogboekFout(
+                f"{self.geblokkeerd}; het register weigert verdere appends tot herstart"
+            )
+
     def _veranker_wachtrij(self) -> None:
         """Schrijf de ankers van alle zojuist gecommitte records met één fsync."""
         regels, self._wachtrij = self._wachtrij, []
-        if self._anker is None or not regels:
+        if not regels:
+            return
+        if self._anker is None:
+            self._kop = regels[-1]
             return
         try:
             with self._anker.open("a", encoding="utf-8") as bestand:
                 bestand.writelines(f"{nr} {h}\n" for nr, h in regels)
                 bestand.flush()
                 os.fsync(bestand.fileno())
+            self._kop = regels[-1]
         except OSError as fout:
             self.geblokkeerd = str(fout)
             raise LogboekFout(
@@ -269,6 +292,7 @@ class Opslag:
                 f"{uitkomst.niet_verankerd} logboekrecord(s) niet verankerd; het register start "
                 "niet tot een beheerder de staart heeft beoordeeld (ONTWERP §4.6)"
             )
+        self._kop = (records[-1]["nr"], records[-1]["hash"]) if records else None
         return uitkomst
 
     def logboek(self) -> list[dict[str, Any]]:
