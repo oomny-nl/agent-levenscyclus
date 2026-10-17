@@ -82,9 +82,10 @@ CI runs it on every push.
 2. **Prompt injection.** An attachment in 2026-0143 tells the agent to read case file 2026-0301 of
    team zorg and add a note there. The hijacked agent tries; both calls fail with
    `relatie_ontbreekt` (no relationship). The legitimate note on 2026-0143 goes through.
-3. **Mover.** HR moves Sanne to team zorg. The agent is refused immediately
-   (`herbeoordeling_vereist`, reason `eigenaar_van_team_gewisseld`). After Sanne confirms again,
-   2026-0142 is closed and 2026-0301 is open. Nobody changed anything per agent.
+3. **Mover.** HR removes Sanne from werk-en-inkomen and adds her to zorg. The agent is refused
+   immediately (`herbeoordeling_vereist`, reason `eigenaar_van_team_gewisseld`); each group change
+   gives it a new version. After Sanne confirms again, 2026-0142 is closed and 2026-0301 is open.
+   Nobody changed anything per agent.
 4. **Leaver, mid-task.** The agent reads a case file; HR sets Sanne to `active=false`; the next tool
    call of the same task is refused (`agent_gedeactiveerd`, `eigenaar_vertrokken`).
 5. **Expiry without recertification.** Kees confirms `rapportagebot` and `archiefbot`. The demo
@@ -99,37 +100,38 @@ From the register's log, as `make demo` shows it (local times; the demo clock ju
 
 ```text
 tijd        agent            eigenaar       gebeurtenis/tool       dossier   uitkomst   reden
-17-10 18:54 dossierassistent Sanne de Vries herbeoordeling_vereist           beheerder  wacht_op_eigenaar
-17-10 18:54 dossierassistent Sanne de Vries bevestigd                        eigenaar   bevestigd_door_eigenaar
-17-10 18:54 dossierassistent Sanne de Vries dossier_lezen          2026-0142 toegestaan
-17-10 18:54 dossierassistent Sanne de Vries notitie_toevoegen      2026-0142 toegestaan
-17-10 18:54 dossierassistent Sanne de Vries dossier_lezen          2026-0143 toegestaan
-17-10 18:54 dossierassistent Sanne de Vries dossier_lezen          2026-0301 geweigerd  relatie_ontbreekt
-17-10 18:54 dossierassistent Sanne de Vries notitie_toevoegen      2026-0301 geweigerd  relatie_ontbreekt
-17-10 18:54 dossierassistent Sanne de Vries notitie_toevoegen      2026-0143 toegestaan
-17-10 18:54 dossierassistent Sanne de Vries herbeoordeling_vereist           bron       eigenaar_van_team_gewisseld
-17-10 18:54 dossierassistent Sanne de Vries dossier_lezen          2026-0142 geweigerd  herbeoordeling_vereist
-17-10 18:54 dossierassistent Sanne de Vries bevestigd                        eigenaar   bevestigd_door_eigenaar
-17-10 18:54 dossierassistent Sanne de Vries dossier_lezen          2026-0142 geweigerd  relatie_ontbreekt
-17-10 18:54 dossierassistent Sanne de Vries dossier_lezen          2026-0301 toegestaan
-17-10 18:54 dossierassistent Sanne de Vries dossier_lezen          2026-0301 toegestaan
-17-10 18:54 dossierassistent Sanne de Vries gedeactiveerd                    bron       eigenaar_vertrokken
-17-10 18:54 dossierassistent Sanne de Vries notitie_toevoegen      2026-0301 geweigerd  agent_gedeactiveerd
-17-10 18:54 rapportagebot    Kees Mulder    herbeoordeling_vereist           beheerder  wacht_op_eigenaar
-17-10 18:54 archiefbot       Kees Mulder    herbeoordeling_vereist           beheerder  wacht_op_eigenaar
-17-10 18:54 rapportagebot    Kees Mulder    bevestigd                        eigenaar   bevestigd_door_eigenaar
-17-10 18:54 archiefbot       Kees Mulder    bevestigd                        eigenaar   bevestigd_door_eigenaar
-17-10 18:54 rapportagebot    Kees Mulder    dossier_lezen          2026-0301 toegestaan
-17-10 18:54 archiefbot       Kees Mulder    dossier_lezen          2026-0301 toegestaan
-17-11 17:54                                 demoklok_vooruit                 beheerder  P31D
-17-11 17:54 archiefbot       Kees Mulder    dossier_lezen          2026-0301 geweigerd  agent_verlopen
-16-01 17:54                                 demoklok_vooruit                 beheerder  P60D
-16-01 17:54 rapportagebot    Kees Mulder    dossier_lezen          2026-0301 geweigerd  herbeoordeling_vereist
-31-01 17:54                                 demoklok_vooruit                 beheerder  P15D
-31-01 17:54 rapportagebot    Kees Mulder    dossier_lezen          2026-0301 geweigerd  agent_gedeactiveerd
-31-01 17:54 rapportagebot    Kees Mulder    gedeactiveerd                    controle   niet_herbeoordeeld
-31-01 17:54 archiefbot       Kees Mulder    verlopen                         controle   vervaldatum_bereikt
-Keten en anker: intact: 41 records, kop ebc6745ef86677b1…, niet verankerd: 0
+17-10 19:11 dossierassistent Sanne de Vries herbeoordeling_vereist           beheerder  wacht_op_eigenaar
+17-10 19:11 dossierassistent Sanne de Vries bevestigd                        eigenaar   bevestigd_door_eigenaar
+17-10 19:11 dossierassistent Sanne de Vries dossier_lezen          2026-0142 toegestaan
+17-10 19:11 dossierassistent Sanne de Vries notitie_toevoegen      2026-0142 toegestaan
+17-10 19:11 dossierassistent Sanne de Vries dossier_lezen          2026-0143 toegestaan
+17-10 19:11 dossierassistent Sanne de Vries dossier_lezen          2026-0301 geweigerd  relatie_ontbreekt
+17-10 19:11 dossierassistent Sanne de Vries notitie_toevoegen      2026-0301 geweigerd  relatie_ontbreekt
+17-10 19:11 dossierassistent Sanne de Vries notitie_toevoegen      2026-0143 toegestaan
+17-10 19:11 dossierassistent Sanne de Vries herbeoordeling_vereist           bron       eigenaar_van_team_gewisseld
+17-10 19:11 dossierassistent Sanne de Vries herbeoordeling_vereist           bron       eigenaar_van_team_gewisseld
+17-10 19:11 dossierassistent Sanne de Vries dossier_lezen          2026-0142 geweigerd  herbeoordeling_vereist
+17-10 19:11 dossierassistent Sanne de Vries bevestigd                        eigenaar   bevestigd_door_eigenaar
+17-10 19:11 dossierassistent Sanne de Vries dossier_lezen          2026-0142 geweigerd  relatie_ontbreekt
+17-10 19:11 dossierassistent Sanne de Vries dossier_lezen          2026-0301 toegestaan
+17-10 19:11 dossierassistent Sanne de Vries dossier_lezen          2026-0301 toegestaan
+17-10 19:11 dossierassistent Sanne de Vries gedeactiveerd                    bron       eigenaar_vertrokken
+17-10 19:11 dossierassistent Sanne de Vries notitie_toevoegen      2026-0301 geweigerd  agent_gedeactiveerd
+17-10 19:11 rapportagebot    Kees Mulder    herbeoordeling_vereist           beheerder  wacht_op_eigenaar
+17-10 19:11 archiefbot       Kees Mulder    herbeoordeling_vereist           beheerder  wacht_op_eigenaar
+17-10 19:11 rapportagebot    Kees Mulder    bevestigd                        eigenaar   bevestigd_door_eigenaar
+17-10 19:11 archiefbot       Kees Mulder    bevestigd                        eigenaar   bevestigd_door_eigenaar
+17-10 19:11 rapportagebot    Kees Mulder    dossier_lezen          2026-0301 toegestaan
+17-10 19:11 archiefbot       Kees Mulder    dossier_lezen          2026-0301 toegestaan
+17-11 18:11                                 demoklok_vooruit                 beheerder  P31D
+17-11 18:11 archiefbot       Kees Mulder    dossier_lezen          2026-0301 geweigerd  agent_verlopen
+16-01 18:11                                 demoklok_vooruit                 beheerder  P60D
+16-01 18:11 rapportagebot    Kees Mulder    dossier_lezen          2026-0301 geweigerd  herbeoordeling_vereist
+31-01 18:11                                 demoklok_vooruit                 beheerder  P15D
+31-01 18:11 rapportagebot    Kees Mulder    dossier_lezen          2026-0301 geweigerd  agent_gedeactiveerd
+31-01 18:11 rapportagebot    Kees Mulder    gedeactiveerd                    controle   niet_herbeoordeeld
+31-01 18:11 archiefbot       Kees Mulder    verlopen                         controle   vervaldatum_bereikt
+Keten en anker: intact: 42 records, kop a3a8d3a48f672c7e…, niet verankerd: 0
 Manipulatieproef: record 12 (dossier_lezen 2026-0301) in een kopie op 'toegestaan' gezet -> keten gebroken bij record 12
 ```
 

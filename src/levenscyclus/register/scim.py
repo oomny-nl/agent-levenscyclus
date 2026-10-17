@@ -56,6 +56,22 @@ AGENT_READONLY = (
     "bevestigingsdeadline",
     "beoordeeldOp",
 )
+AGENT_ATTRIBUTEN = AGENT_SCHRIJFBAAR + AGENT_READONLY
+# Canonieke namen van de kernattributen; SCIM-attribuutnamen zijn hoofdletterongevoelig
+# (RFC 7643 §2.1), dus `Active` en `active` zijn hetzelfde attribuut.
+KERN = (
+    "id",
+    "meta",
+    "schemas",
+    "externalId",
+    "userName",
+    "displayName",
+    "userType",
+    "active",
+    "groups",
+    "members",
+    URN_AGENT,
+)
 USER_SERVER = ("id", "meta", "schemas", "groups")
 GROUP_SERVER = ("id", "meta", "schemas")
 
@@ -117,6 +133,48 @@ def voldoet(resource: dict[str, Any], paren: list[tuple[str, str]]) -> bool:
     return True
 
 
+# Attribuutnamen ----------------------------------------------------------------------------------
+
+
+def canonieke_naam(naam: str, bekend: tuple[str, ...]) -> str:
+    """De canonieke schrijfwijze van een bekend attribuut; een onbekende naam blijft gelijk."""
+    for kandidaat in bekend:
+        if kandidaat.lower() == naam.lower():
+            return kandidaat
+    return naam
+
+
+def normaliseer_namen(waarden: dict[str, Any], bekend: tuple[str, ...]) -> dict[str, Any]:
+    """Zet de sleutels van een object in canonieke schrijfwijze.
+
+    Raises:
+        ScimFout: `400 invalidValue` als een attribuut in twee schrijfwijzen voorkomt.
+    """
+    uit: dict[str, Any] = {}
+    for sleutel, waarde in waarden.items():
+        naam = canonieke_naam(sleutel, bekend)
+        if naam in uit:
+            raise ScimFout(400, f"attribuut {naam!r} komt dubbel voor", "invalidValue")
+        uit[naam] = waarde
+    return uit
+
+
+def schakelaar_uit_patch(body: dict[str, Any]) -> bool | None:
+    """De `active`-waarde die een PatchOp expliciet zet, of None als hij `active` niet raakt."""
+    gezet: bool | None = None
+    for operatie in body.get("Operations") or []:
+        if not isinstance(operatie, dict):
+            continue
+        pad, waarde = operatie.get("path"), operatie.get("value")
+        if pad is None and isinstance(waarde, dict):
+            waarde = normaliseer_namen(waarde, KERN).get("active")
+        elif pad is None or _splits_pad(str(pad))[1].lower() != "active":
+            continue
+        if isinstance(waarde, bool):
+            gezet = waarde
+    return gezet
+
+
 # PATCH -------------------------------------------------------------------------------------------
 
 
@@ -176,6 +234,8 @@ def _patch_attribuut(resource: dict[str, Any], op: str, pad: str, waarde: Any) -
     if "[" in attr or "." in attr:
         raise ScimFout(400, f"path {pad!r} valt buiten het profiel", "invalidPath")
     doel = _doel(resource, urn)
+    bekend = AGENT_ATTRIBUTEN if doel is not resource else KERN
+    attr = canonieke_naam(attr, (*bekend, *doel))
     if op == "remove":
         doel.pop(attr, None)
     elif op == "add" and isinstance(doel.get(attr), list) and isinstance(waarde, list):
@@ -231,9 +291,10 @@ def is_agent(resource: dict[str, Any]) -> bool:
 
 def strip_server(resource: dict[str, Any], readonly: tuple[str, ...]) -> dict[str, Any]:
     """Verwijder server- en readOnly-attributen uit een clientbody (RFC 7644 §3.5.1)."""
-    schoon = {k: v for k, v in resource.items() if k not in readonly}
+    schoon = {k: v for k, v in normaliseer_namen(resource, KERN).items() if k not in readonly}
     ext = schoon.get(URN_AGENT)
     if isinstance(ext, dict):
+        ext = normaliseer_namen(ext, AGENT_ATTRIBUTEN)
         schoon[URN_AGENT] = {k: v for k, v in ext.items() if k not in AGENT_READONLY}
     return schoon
 
@@ -415,6 +476,17 @@ def kernschemas() -> list[dict[str, Any]]:
         "meta": {"resourceType": "Schema", "location": f"/scim/v2/Schemas/{URN_GROUP}"},
     }
     return [user, group]
+
+
+def lijstantwoord(resources: list[dict[str, Any]]) -> dict[str, Any]:
+    """Een volledige ListResponse zonder paginering (RFC 7644 §3.4.2, §4)."""
+    return {
+        "schemas": [URN_LIST],
+        "totalResults": len(resources),
+        "itemsPerPage": len(resources),
+        "startIndex": 1,
+        "Resources": resources,
+    }
 
 
 def resource_types() -> list[dict[str, Any]]:

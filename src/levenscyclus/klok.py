@@ -46,6 +46,19 @@ class Klok:
         """Registertijd (UTC)."""
         return datetime.now(UTC) + self._offset
 
+    def herstel(self, offset: timedelta) -> None:
+        """Zet de offset terug na een herstart, zodat de registertijd niet terugspringt.
+
+        Raises:
+            PermissionError: Bij een offset buiten de demostand.
+        """
+        if offset and not self.demostand:
+            raise PermissionError(
+                "het logboek bevat demoklokstappen, maar DEMO_KLOK staat uit; start met "
+                "DEMO_KLOK=1 of met een leeg register"
+            )
+        self._offset = offset
+
     def zet_vooruit(self, duur: timedelta) -> datetime:
         """Zet de klok vooruit; nooit terug.
 

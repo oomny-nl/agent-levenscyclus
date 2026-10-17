@@ -14,6 +14,7 @@ import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,19 @@ class Principal:
     subject: str | None = None
 
 
+@dataclass(frozen=True)
+class Mutatie:
+    """Eén schrijfverzoek op Users: wie, welke operatie en de expliciete `active`-opdracht.
+
+    `schakelaar` is alleen gezet als de beheerder bij een bestaande agent `active` expliciet
+    zet (noodstop of heractivering); anders None.
+    """
+
+    principal: Principal
+    op: str
+    schakelaar: bool | None = None
+
+
 @dataclass
 class Dienst:
     """Gedeelde onderdelen van het register.
@@ -67,11 +81,13 @@ class Dienst:
     fga: Fga | None = None
     motor: Motor | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    herbouw_open: bool = False
 
     async def start(self, pogingen: int = 30) -> None:
         """Verifieer het logboek, maak de principal-tokens en zorg voor store en model."""
         uitkomst = self.opslag.verifieer_bij_start()
         log.info("logboek bij start: %s", uitkomst.reden)
+        self.klok.herstel(demoklok_uit_logboek(self.opslag.logboek()))
         for naam in LEZERS:
             self.opslag.token_voor(naam, None, self.inst.geheimen_dir / f"{naam}.token")
         for poging in range(pogingen):
@@ -97,7 +113,11 @@ class Dienst:
         ids = await self._zorg_ids()
         if self.f.vernieuw(ids):
             log.warning("OpenFGA-store of model opnieuw aangemaakt; tuples worden herbouwd")
+            self.herbouw_open = True
+        if self.herbouw_open:
+            # Blijft open tot een volledige herbouw slaagt; een halve herbouw wordt hervat.
             await self.m.herbouw_alles()
+            self.herbouw_open = False
         return ids
 
     @property
@@ -116,6 +136,16 @@ class Dienst:
 
 
 # Hulpfuncties ------------------------------------------------------------------------------------
+
+
+def demoklok_uit_logboek(records: list[dict[str, Any]]) -> timedelta:
+    """De demoklok-offset volgens het geverifieerde logboek: de som van alle stappen vooruit."""
+    stappen = (
+        parse_duur(str(r.get("reden")))
+        for r in records
+        if r.get("soort") == "levenscyclus" and r.get("gebeurtenis") == "demoklok_vooruit"
+    )
+    return sum(stappen, timedelta(0))
 
 
 def _principal(dienst: Dienst, request: Request, *toegestaan: str) -> Principal:
@@ -239,14 +269,15 @@ def _haal(dienst: Dienst, soort: str, id_: str) -> dict[str, Any]:
 
 
 async def _schrijf_user(
-    dienst: Dienst, principal: Principal, oud: dict[str, Any] | None, body: dict[str, Any], op: str
+    dienst: Dienst, mutatie: Mutatie, oud: dict[str, Any] | None, body: dict[str, Any]
 ) -> dict[str, Any]:
     """Gedeelde route voor POST, PUT en PATCH op Users (binnen de lock)."""
+    principal, op = mutatie.principal, mutatie.op
     nieuw = scim.valideer_user(scim.strip_server(body, scim.USER_SERVER))
     _controleer_rol(dienst, principal, oud, nieuw, op)
     nu = iso(dienst.klok.nu())
     if is_agent(nieuw):
-        opgeslagen = await _schrijf_agent(dienst, principal, oud, nieuw, op)
+        opgeslagen = await _schrijf_agent(dienst, mutatie, oud, nieuw)
     elif oud is None:
         with dienst.opslag.transactie():
             opgeslagen = dienst.opslag.maak("User", nieuw, nu)
@@ -263,16 +294,20 @@ async def _schrijf_user(
 
 
 async def _schrijf_agent(
-    dienst: Dienst, principal: Principal, oud: dict[str, Any] | None, nieuw: dict[str, Any], op: str
+    dienst: Dienst, mutatie: Mutatie, oud: dict[str, Any] | None, nieuw: dict[str, Any]
 ) -> dict[str, Any]:
-    dienst.m.controleer_eigenaar(ext(nieuw)["eigenaar"]["value"])
+    actor = mutatie.principal.soort
+    # Een actieve eigenaar is alleen bij aanmaak vereist; bij een wijziging controleert de motor
+    # hem bij eigenaarswissel en heractivering, zodat een noodstop ook na een leaver kan.
+    if oud is None:
+        dienst.m.controleer_eigenaar(ext(nieuw)["eigenaar"]["value"])
     with dienst.opslag.transactie():
         if oud is None:
             aangemaakt = dienst.opslag.maak("User", nieuw, iso(dienst.klok.nu()))
-            opgeslagen = dienst.m.registreer_aanmaak(aangemaakt, principal.soort)
+            opgeslagen = dienst.m.registreer_aanmaak(aangemaakt, actor)
         else:
-            opgeslagen = dienst.m.registreer_agentwijziging(oud, nieuw, principal.soort)
-        _log_scim(dienst, principal, op, f"User {opgeslagen['userName']}", "ok")
+            opgeslagen = dienst.m.registreer_agentwijziging(oud, nieuw, actor, mutatie.schakelaar)
+        _log_scim(dienst, mutatie.principal, mutatie.op, f"User {opgeslagen['userName']}", "ok")
     if oud is None:
         await dienst.m.sync_na_aanmaak(opgeslagen)
     else:
@@ -297,6 +332,20 @@ async def _verwijder_user(dienst: Dienst, principal: Principal, oud: dict[str, A
         await dienst.m.sync_na_gebruikerswijziging(oud["id"], getroffen)
 
 
+def _schakelaar_uit_put(dienst: Dienst, oud: dict[str, Any], body: dict[str, Any]) -> bool | None:
+    """`active` uit een PUT op een agent, alleen als hij afwijkt van de effectieve waarde.
+
+    Een PUT bevat de hele resource; wie de gelezen agent ongewijzigd terugschrijft, geeft geen
+    opdracht. Een expliciete noodstop op een al gedeactiveerde agent gaat via PATCH.
+    """
+    if not is_agent(oud):
+        return None
+    gewenst = scim.normaliseer_namen(body, scim.KERN).get("active")
+    if not isinstance(gewenst, bool):
+        return None
+    return gewenst if gewenst != dienst.m.effectief(oud)["active"] else None
+
+
 def _users(app: FastAPI, dienst: Dienst) -> None:
     basis = "/scim/v2/Users"
 
@@ -315,7 +364,7 @@ def _users(app: FastAPI, dienst: Dienst) -> None:
         principal = _principal(dienst, request, *MUTATOREN)
         body = await _json(request)
         async with dienst.lock:
-            opgeslagen = await _schrijf_user(dienst, principal, None, body, "POST")
+            opgeslagen = await _schrijf_user(dienst, Mutatie(principal, "POST"), None, body)
         return _antwoord(_verrijk(dienst, opgeslagen), 201)
 
     @app.put(basis + "/{id_}")
@@ -324,7 +373,8 @@ def _users(app: FastAPI, dienst: Dienst) -> None:
         body = await _json(request)
         async with dienst.lock:
             oud = _haal(dienst, "User", id_)
-            opgeslagen = await _schrijf_user(dienst, principal, oud, body, "PUT")
+            mutatie = Mutatie(principal, "PUT", _schakelaar_uit_put(dienst, oud, body))
+            opgeslagen = await _schrijf_user(dienst, mutatie, oud, body)
         return _antwoord(_verrijk(dienst, opgeslagen))
 
     @app.patch(basis + "/{id_}")
@@ -335,7 +385,8 @@ def _users(app: FastAPI, dienst: Dienst) -> None:
             oud = _haal(dienst, "User", id_)
             huidig = _verrijk(dienst, oud) if is_agent(oud) else dict(oud)
             nieuw = scim.pas_patch_toe(huidig, body)
-            opgeslagen = await _schrijf_user(dienst, principal, oud, nieuw, "PATCH")
+            mutatie = Mutatie(principal, "PATCH", scim.schakelaar_uit_patch(body))
+            opgeslagen = await _schrijf_user(dienst, mutatie, oud, nieuw)
         return _antwoord(_verrijk(dienst, opgeslagen))
 
     @app.delete(basis + "/{id_}")
@@ -433,11 +484,12 @@ def _discovery(app: FastAPI) -> None:
 
     @app.get("/scim/v2/ResourceTypes")
     async def resource_types() -> Response:
-        return JSONResponse(scim.resource_types(), media_type=scim.MEDIA)
+        return JSONResponse(scim.lijstantwoord(scim.resource_types()), media_type=scim.MEDIA)
 
     @app.get("/scim/v2/Schemas")
     async def schemas() -> Response:
-        return JSONResponse([*scim.kernschemas(), scim.agentschema()], media_type=scim.MEDIA)
+        schemas = [*scim.kernschemas(), scim.agentschema()]
+        return JSONResponse(scim.lijstantwoord(schemas), media_type=scim.MEDIA)
 
 
 # Beheer ------------------------------------------------------------------------------------------

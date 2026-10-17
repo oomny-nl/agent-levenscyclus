@@ -362,12 +362,26 @@ class Motor:
         oude_leden = leden_van(oud) if oud else set()
         nieuwe_leden = leden_van(nieuw) if nieuw else set()
         gewijzigd = oude_leden ^ nieuwe_leden
-        getroffen = [
-            self._bewaar_status(agent, HERBEOORDELING, "eigenaar_van_team_gewisseld", "bron")
-            for agent in self._agents_van(gewijzigd)
-            if ext(agent).get("levenscyclusStatus") == ACTIEF
-        ]
+        reden = "eigenaar_van_team_gewisseld"
+        getroffen = []
+        for agent in self._agents_van(gewijzigd):
+            status = ext(agent).get("levenscyclusStatus")
+            if status == ACTIEF:
+                getroffen.append(self._bewaar_status(agent, HERBEOORDELING, reden, "bron"))
+            elif status == HERBEOORDELING:
+                self._verhoog_versie(agent, reden, "bron")
         return gewijzigd, getroffen
+
+    def _verhoog_versie(self, agent: dict[str, Any], reden: str, actor: str) -> None:
+        """Nieuwe recordversie zonder statuswissel: een eerder gelezen versie bevestigt niet meer.
+
+        Voor een agent die al op bevestiging wacht; status en bevestigingsdeadline blijven staan.
+        """
+        e = ext(agent)
+        e["statusReden"] = reden
+        with self.opslag.transactie():
+            opgeslagen = self.opslag.vervang("User", agent["id"], agent, iso(self.klok.nu()))
+            self._log_levenscyclus(opgeslagen, HERBEOORDELING, actor, reden, van=HERBEOORDELING)
 
     async def sync_na_groepswijziging(
         self, eigenaren: set[str], getroffen: list[dict[str, Any]]
@@ -400,27 +414,28 @@ class Motor:
     # Beheerderswijziging ----------------------------------------------------------------------
 
     def registreer_agentwijziging(
-        self, oud: dict[str, Any], nieuw: dict[str, Any], actor: str
+        self, oud: dict[str, Any], nieuw: dict[str, Any], actor: str, schakelaar: bool | None
     ) -> dict[str, Any]:
         """Beheerderswijziging, in de transactie van de `PUT`/`PATCH`.
 
         Eigenaarswissel, configuratiewijziging, noodstop en heractivering; opgeslagen
-        statusvelden blijven behouden (readOnly), `active` is de schakelaar van de beheerder.
+        statusvelden blijven behouden (readOnly). `schakelaar` is de expliciete `active`-opdracht
+        van de beheerder (None als hij `active` niet zet); hij wordt nooit afgeleid uit een
+        verschil tussen opgeslagen en effectieve toestand.
         """
         oe, ne = ext(oud), ext(nieuw)
-        actief_oud, actief_nieuw = oud.get("active", True), nieuw.get("active", True)
         for sleutel in STATUSVELDEN:
             if sleutel in oe:
                 ne[sleutel] = oe[sleutel]
             else:
                 ne.pop(sleutel, None)
-        nieuw["active"] = actief_oud
+        nieuw["active"] = oud.get("active", True)
         nieuwe_eigenaar = ne["eigenaar"]["value"] != oe["eigenaar"]["value"]
         if nieuwe_eigenaar:
             self.controleer_eigenaar(ne["eigenaar"]["value"])
         configuratie = any(oe.get(k) != ne.get(k) for k in AGENT_CONFIGURATIE)
         opgeslagen = self.opslag.vervang("User", oud["id"], nieuw, iso(self.klok.nu()))
-        opgeslagen = self._verwerk_schakelaar(opgeslagen, actief_oud, actief_nieuw, actor)
+        opgeslagen = self._verwerk_schakelaar(opgeslagen, schakelaar, actor)
         if is_noodstop(opgeslagen):
             return opgeslagen
         status = ext(opgeslagen).get("levenscyclusStatus")
@@ -442,11 +457,13 @@ class Motor:
         await self._sync_gelogd([agent], set())
 
     def _verwerk_schakelaar(
-        self, agent: dict[str, Any], actief_oud: bool, actief_nieuw: bool, actor: str
+        self, agent: dict[str, Any], schakelaar: bool | None, actor: str
     ) -> dict[str, Any]:
-        if actief_oud and not actief_nieuw and not is_noodstop(agent):
+        """Noodstop bij expliciet `active=false`, in elke status; heractivering bij `true`."""
+        if schakelaar is False and not is_noodstop(agent):
             return self._bewaar_status(agent, GEDEACTIVEERD, NOODSTOP, actor)
-        if not actief_oud and actief_nieuw:
+        ingeschakeld = ext(self.effectief(agent))["levenscyclusStatus"] in INGESCHAKELD
+        if schakelaar is True and not ingeschakeld:
             try:
                 self.controleer_eigenaar(ext(agent)["eigenaar"]["value"])
             except ScimFout as fout:

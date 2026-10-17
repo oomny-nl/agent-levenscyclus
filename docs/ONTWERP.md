@@ -114,7 +114,8 @@ de repo claimt niet meer dan wat hieronder staat.
 
 | Onderdeel | Ondersteund | Niet ondersteund (gedocumenteerd, herkenbaar geweigerd) |
 |---|---|---|
-| Discovery | `GET /ServiceProviderConfig`, `/ResourceTypes` (met `schemaExtensions` voor `User`), `/Schemas` (core `User`, core `Group`, agentextensie met subattribuutmetadata) | |
+| Discovery | `GET /ServiceProviderConfig`, `/ResourceTypes` (met `schemaExtensions` voor `User`), `/Schemas` (core `User`, core `Group`, agentextensie met subattribuutmetadata); de laatste twee als `ListResponse` (RFC 7644 §4) | |
+| Attribuutnamen | hoofdletterongevoelig (RFC 7643 §2.1): `Active` in een body of PATCH-`path` is `active`; het register slaat de canonieke schrijfwijze op, vóór validatie en rolscheiding. Een attribuut in twee schrijfwijzen in één object: `400 invalidValue` | |
 | Resources | `POST`, `GET`, `PUT`, `PATCH`, `DELETE` op `/Users` en `/Groups`; servergegenereerde `id` en `meta` (`resourceType`, `created`, `lastModified`, `location`, `version`); `userName` verplicht en uniek (hoofdletterongevoelig); `schemas` met core- en extensie-URI; extensieattributen in de extensiecontainer | `/Me`, `/Bulk`, `.search`, `sortBy`, enterprise-extensie, geneste groepen (een `member` moet een `User` zijn) |
 | Filter | `attr eq "waarde"` op `userName`, `displayName`, `userType`, `externalId`, `id`; combinaties met `and`; `excludedAttributes=members`; `attributes` | `ne`, `co`, `sw`, `pr`, `or`, `not`, groepering, filters op extensieattributen: `400 invalidFilter` |
 | PATCH (RFC 7644 §3.5.2) | `add`, `remove`, `replace`, operatienaam hoofdletterongevoelig; `path` als `attr`, `ext-urn:attr`, `members`, `members[value eq "id"]`; `add`/`replace` zonder `path` met een waardeobject; alle operaties atomair: faalt één, dan verandert niets (`400`) | andere filterexpressies in `path`, `path` met subattribuut na een filter |
@@ -228,15 +229,19 @@ overgang verhoogt `meta.version`, zodat een lopende toolcall op de oude versie s
 |---|---|---|
 | Joiner: agent aangemaakt | beheerder, `POST /Users` | `herbeoordeling_vereist` (`wacht_op_eigenaar`), `bevestigingsdeadline = nu + bevestigingstermijn`; geen toegang tot de eigenaar bevestigt. Geweigerd (`400`) als de vervaldatum niet in de toekomst ligt, een termijn ongeldig is, of de eigenaar ontbreekt, inactief is of een agent is |
 | Bevestiging | eigenaar, `POST /beheer/agents/{id}/bevestiging` | `actief`, `laatsteBevestiging = nu`, `bevestigdeVersie = meta.version`; toegangsrelaties gesynchroniseerd (zie 4.3) |
-| Mover: teamlidmaatschap van de eigenaar wijzigt feitelijk | bron, `PATCH`/`PUT`/`DELETE` op `/Groups` | teamrelaties in OpenFGA bijgewerkt (toegang tot oude teamdossiers verdwijnt direct); elke agent van een eigenaar wiens lidmaatschap feitelijk is veranderd: `herbeoordeling_vereist` (`eigenaar_van_team_gewisseld`). Een herhaalde identieke `PATCH` of een `PUT` met dezelfde leden verandert niets en dwingt geen beoordeling af |
+| Mover: teamlidmaatschap van de eigenaar wijzigt feitelijk | bron, `PATCH`/`PUT`/`DELETE` op `/Groups` | teamrelaties in OpenFGA bijgewerkt (toegang tot oude teamdossiers verdwijnt direct); elke agent van een eigenaar wiens lidmaatschap feitelijk is veranderd: `herbeoordeling_vereist` (`eigenaar_van_team_gewisseld`). Een agent die al op bevestiging wachtte, houdt zijn deadline maar krijgt een nieuwe `meta.version`, zodat een vóór de wissel gelezen versie niet meer bevestigt. Een herhaalde identieke `PATCH` of een `PUT` met dezelfde leden verandert niets en dwingt geen beoordeling af |
 | Leaver: eigenaar `active=false` of verwijderd | bron | agent `gedeactiveerd` (`eigenaar_vertrokken`), `active=false`, toegangsrelaties verwijderd |
 | Eigenaar gewijzigd | beheerder, `PATCH` op `eigenaar` | nieuwe eigenaar moet bestaan, actief zijn en een mens zijn (`400`); `agent#eigenaar` naar de nieuwe eigenaar; `herbeoordeling_vereist` (`nieuwe_eigenaar`). Dit is ook de herstelroute na een leaver |
 | Configuratie gewijzigd | beheerder, `PATCH`/`PUT` op `doel`, `toegestaneTools`, `publiekeSleutel`, `vervaldatum`, `herbeoordelingTermijn` of `bevestigingstermijn` | als de agent `actief` was: `herbeoordeling_vereist` (`configuratie_gewijzigd`), toegangsrelaties verwijderd; de eigenaar bevestigt de nieuwe configuratie. Een nieuwe `vervaldatum` op een `verlopen` agent: `herbeoordeling_vereist` (`vervaldatum_verlengd`) |
 | Periodieke herbeoordeling | tijdregel 3 | `herbeoordeling_vereist` (`periodieke_herbeoordeling`) |
 | Niet bevestigd | tijdregel 4 | `gedeactiveerd` (`niet_herbeoordeeld`) |
 | Verval | tijdregel 2 | `verlopen` (`vervaldatum_bereikt`), `active=false`, toegangsrelaties verwijderd bij de controle; de poort en de OpenFGA-conditie weigeren al eerder |
-| Noodstop | beheerder, `PATCH active=false` | `gedeactiveerd` (`uitgeschakeld_door_beheerder`), dominant |
-| Heractivering | beheerder, `PATCH active=true` | alleen als de eigenaar bestaat en actief is (`409` anders): `herbeoordeling_vereist` (`heractiveerd_door_beheerder`) |
+| Noodstop | beheerder, `PATCH active=false` | `gedeactiveerd` (`uitgeschakeld_door_beheerder`), dominant; ook op een al gedeactiveerde agent en na een leaver |
+| Heractivering | beheerder, `PATCH active=true` | alleen als de agent effectief niet is ingeschakeld en de eigenaar bestaat en actief is (`409` anders): `herbeoordeling_vereist` (`heractiveerd_door_beheerder`) |
+
+Noodstop en heractivering volgen alleen een expliciete opdracht: een PATCH-operatie op `active`,
+of een `PUT` waarvan `active` afwijkt van de effectieve waarde. Wie een gelezen record (met de
+afgeleide `active`) ongewijzigd terugschrijft of alleen een ander attribuut wijzigt, schakelt niets.
 | Verwijderd | beheerder, `DELETE /Users/{id}` | alle tuples van de agent verwijderd (ook `agent#eigenaar`), gelogd `verwijderd` |
 
 Twee soorten relaties in OpenFGA (zie 4.3): **toegangsrelaties** (`gebruiker#agent`,
@@ -490,7 +495,11 @@ aangehangen of herschreven; de hashketen kan die gevallen niet onderscheiden, du
 verankert nooit zelf achteraf. Herstel is een menselijke handeling buiten het register (het record
 beoordelen, dan het anker bewust aanvullen of het record verwijderen) en valt buiten de demo. De
 controle eist dat het anker naar een record wijst dat in de keten bestaat met precies die hash, en
-telt de records na het anker als `niet_verankerd`; de demo en de tests eisen nul.
+telt de records na het anker als `niet_verankerd`; de demo en de tests eisen nul. Elk record tot
+en met het laatste anker moet zelf verankerd zijn. Tijdens bedrijf onthoudt het register het
+laatste record dat het zelf verankerde; staat er bij een append een ander laatste record in de
+database, dan gaat het in de blokkeerstand. Zo bouwt een legitiem record nooit voort op een
+record dat buiten het register om is toegevoegd.
 
 Verificatie: `GET /logboek` levert alle records; de demo en de tests controleren de keten en het
 anker. De demo doet daarna een manipulatieproef op een kopie: één weigering wordt omgezet in
@@ -523,7 +532,10 @@ alleen met `DEMO_KLOK=1` via `POST /beheer/klok` vooruit kan (nooit terug). Alle
 levenscyclusregels, `beoordeeldOp`, de `huidige_tijd` voor OpenFGA-condities en de tijdstempels in
 het logboek gebruiken de registerklok. Agent-asserties gebruiken de echte klok: hun 60 s zegt iets
 over het netwerk, niet over de levenscyclus. Zonder `DEMO_KLOK=1` (en in de integratietests die dat
-niet nodig hebben) is de offset nul en bestaat het endpoint niet (`404`). CI-vertraging,
+niet nodig hebben) is de offset nul en bestaat het endpoint niet (`404`). Elke stap staat als
+`demoklok_vooruit` in het geverifieerde logboek; na een herstart zet het register de offset
+daaruit terug, zodat de registertijd nooit terugspringt. Bevat het logboek stappen terwijl
+`DEMO_KLOK` uitstaat, dan weigert het register te starten. CI-vertraging,
 containerstart of MCP-initialisatie beïnvloeden de uitkomst daardoor niet.
 
 ## 5. De scenario's in de demo
