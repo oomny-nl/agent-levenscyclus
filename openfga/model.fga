@@ -1,0 +1,30 @@
+model
+  schema 1.1
+
+type gebruiker
+  relations
+    define agent: [agent with niet_verlopen]
+
+type agent
+  relations
+    define eigenaar: [gebruiker]
+
+type team
+  relations
+    define lid: [gebruiker]
+    define agent_lid: agent from lid
+
+type tool
+  relations
+    define toegestaan: [agent]
+
+type dossier
+  relations
+    define team: [team]
+    define lezen: lid from team or agent_lid from team
+    define notitie_schrijven: lid from team or agent_lid from team
+    define besluit_nemen: lid from team
+
+condition niet_verlopen(huidige_tijd: timestamp, vervaldatum: timestamp) {
+  huidige_tijd < vervaldatum
+}

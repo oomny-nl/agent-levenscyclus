@@ -1,0 +1,71 @@
+[project]
+name = "agent-levenscyclus"
+version = "0.1.0"
+description = "Levenscyclus en governance van AI-agents als identiteiten: SCIM 2.0, OpenFGA, MCP-gateway, herbeoordeling en een geketend logboek"
+readme = "README.md"
+license = "EUPL-1.2"
+authors = [{ name = "Michael Owen Meijer", email = "michael@oomny.nl" }]
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "fastapi==0.143.3",
+    "uvicorn==0.54.0",
+    "mcp==2.3.0",
+    "httpx2==2.13.1",
+    "openfga-sdk==0.10.5",
+    "langgraph==1.2.16",
+    "langchain-core==1.6.12",
+    "pyjwt[crypto]==2.15.1",
+    "cryptography==50.0.2",
+    "pydantic==2.14.1",
+    "rich==15.0.0",
+]
+
+[project.optional-dependencies]
+llm = ["langchain-openai==1.7.2"]
+
+[project.scripts]
+levenscyclus-register = "levenscyclus.register.app:main"
+levenscyclus-poort = "levenscyclus.poort.app:main"
+levenscyclus-beheer = "levenscyclus.beheer_cli:main"
+levenscyclus-demo = "levenscyclus.demo:main"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.3.0",
+    "ruff==0.17.1",
+    "ty==0.0.89",
+]
+
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/levenscyclus"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "C90", "PL", "N", "ASYNC", "PT"]
+# N818: uitzonderingen heten hier ...Fout (Nederlands voor Error).
+ignore = ["PLR2004", "RUF001", "RUF002", "RUF003", "N818"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "PLR0913", "PLR0915"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 8
+
+[tool.ruff.lint.pylint]
+max-args = 5
+max-positional-args = 5
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integratie: draait tegen de echte compose-keten (OpenFGA, register, poort)"]
+addopts = "-ra"
+asyncio_mode = "auto"

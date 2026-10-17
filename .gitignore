@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Lokale geheimen en runtime-data: nooit committen
+.env
+geheimen/
+data/
+*.pem
+*.key
+
+# OS
+.DS_Store

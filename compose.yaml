@@ -1,0 +1,130 @@
+# Lokale demoketen: OpenFGA, register (SCIM + levenscyclus + logboek), poort (MCP-gateway) en, op
+# verzoek, demo en integratietests. Start alles met: make demo
+#
+# Twee netwerken: `intern` (OpenFGA, register, poort) en `front` (register, poort, demo). De demo,
+# en dus de agent, heeft geen route naar OpenFGA en geen preshared key.
+name: agent-levenscyclus
+
+x-omgeving: &omgeving
+  REGISTER_URL: http://register:8000
+  POORT_URL: http://poort:8000/mcp
+  OPENFGA_URL: http://openfga:8080
+  OPENFGA_STORE: lindevoort
+  OPENFGA_MODEL_PAD: /app/openfga/model.json
+  GEHEIMEN_DIR: /geheimen
+  DB_PAD: /data/levenscyclus.db
+  ANKER_PAD: /anker/logboek-anker.log
+  MAX_SKEW: "5"
+  TZ: Europe/Amsterdam
+
+x-app: &app
+  build: .
+  image: agent-levenscyclus:lokaal
+
+x-health: &health
+  test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+  interval: 3s
+  timeout: 5s
+  retries: 40
+  start_period: 5s
+
+services:
+  openfga:
+    image: openfga/openfga:v1.22.0@sha256:9cf9a20af32a40434cd3a788c429879439ee9ea9abf65c9c200ee17cd43f769e
+    command: ["run"]
+    environment:
+      OPENFGA_DATASTORE_ENGINE: memory
+      OPENFGA_AUTHN_METHOD: preshared
+      OPENFGA_AUTHN_PRESHARED_KEYS: ${OPENFGA_PRESHARED_KEY:?Draai make; dat zet de sleutel in .env}
+      OPENFGA_PLAYGROUND_ENABLED: "false"
+      OPENFGA_LOG_FORMAT: json
+    networks: [intern]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr=openfga:8081"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 3s
+
+  register:
+    <<: *app
+    command: ["levenscyclus-register"]
+    environment:
+      <<: *omgeving
+      OPENFGA_PRESHARED_KEY: ${OPENFGA_PRESHARED_KEY:?Draai make; dat zet de sleutel in .env}
+      DEMO_KLOK: "1"
+    volumes:
+      - geheimen:/geheimen
+      - data:/data
+      - anker:/anker
+    networks: [intern, front]
+    depends_on:
+      openfga:
+        condition: service_healthy
+    healthcheck: *health
+
+  poort:
+    <<: *app
+    command: ["levenscyclus-poort"]
+    environment:
+      <<: *omgeving
+      OPENFGA_PRESHARED_KEY: ${OPENFGA_PRESHARED_KEY:?Draai make; dat zet de sleutel in .env}
+      DB_PAD: /data/poort.db
+    volumes:
+      - geheimen:/geheimen:ro
+      - poortdata:/data
+    networks: [intern, front]
+    depends_on:
+      register:
+        condition: service_healthy
+    healthcheck: *health
+
+  demo:
+    <<: *app
+    profiles: ["demo"]
+    command: ["levenscyclus-demo"]
+    environment:
+      <<: *omgeving
+      DEMO_BREEDTE: ${DEMO_BREEDTE:-100}
+      DEMO_TEMPO: ${DEMO_TEMPO:-0}
+      PLANNER: ${PLANNER:-deterministisch}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      OPENAI_API_VERSION: ${OPENAI_API_VERSION:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - geheimen:/geheimen:ro
+      - anker:/anker:ro
+    networks: [front]
+    depends_on:
+      poort:
+        condition: service_healthy
+
+  tests:
+    <<: *app
+    profiles: ["tests"]
+    command: ["pytest", "-m", "integratie", "-v", "-p", "no:cacheprovider"]
+    environment:
+      <<: *omgeving
+      OPENFGA_PRESHARED_KEY: ${OPENFGA_PRESHARED_KEY:?Draai make; dat zet de sleutel in .env}
+    volumes:
+      - geheimen:/geheimen:ro
+      - anker:/anker:ro
+      - data:/data:ro
+    networks: [intern, front]
+    depends_on:
+      poort:
+        condition: service_healthy
+
+networks:
+  intern:
+  front:
+
+volumes:
+  geheimen:
+  data:
+  anker:
+  poortdata:

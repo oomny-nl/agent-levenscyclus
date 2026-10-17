@@ -1,0 +1,123 @@
+# Modeltests voor openfga/model.fga: fga model test --tests openfga/model.fga.yaml
+name: lindevoort
+model_file: ./model.fga
+tuples:
+  - user: gebruiker:sanne
+    relation: lid
+    object: team:werk-en-inkomen
+  - user: gebruiker:kees
+    relation: lid
+    object: team:zorg
+  - user: team:werk-en-inkomen
+    relation: team
+    object: dossier:2026-0142
+  - user: team:zorg
+    relation: team
+    object: dossier:2026-0301
+  - user: gebruiker:sanne
+    relation: eigenaar
+    object: agent:dossierassistent
+  - user: agent:dossierassistent
+    relation: agent
+    object: gebruiker:sanne
+    condition:
+      name: niet_verlopen
+      context:
+        vervaldatum: "2027-01-01T00:00:00Z"
+  - user: agent:dossierassistent
+    relation: toegestaan
+    object: tool:dossier_lezen
+  - user: agent:dossierassistent
+    relation: toegestaan
+    object: tool:notitie_toevoegen
+  - user: gebruiker:kees
+    relation: eigenaar
+    object: agent:archiefbot
+  - user: agent:archiefbot
+    relation: agent
+    object: gebruiker:kees
+    condition:
+      name: niet_verlopen
+      context:
+        vervaldatum: "2026-02-01T00:00:00Z"
+  - user: agent:archiefbot
+    relation: toegestaan
+    object: tool:dossier_lezen
+tests:
+  - name: agent_erft_teamtoegang_van_eigenaar
+    description: De agent van Sanne mag lezen en notities schrijven op een dossier van haar team.
+    check:
+      - user: agent:dossierassistent
+        object: dossier:2026-0142
+        context:
+          huidige_tijd: "2026-06-01T12:00:00Z"
+        assertions:
+          lezen: true
+          notitie_schrijven: true
+  - name: agent_geen_toegang_tot_ander_team
+    description: Dossier 2026-0301 hoort bij zorg; Sanne is geen lid, haar agent dus ook niet.
+    check:
+      - user: agent:dossierassistent
+        object: dossier:2026-0301
+        context:
+          huidige_tijd: "2026-06-01T12:00:00Z"
+        assertions:
+          lezen: false
+          notitie_schrijven: false
+  - name: agent_kan_geen_besluit_nemen
+    description: besluit_nemen bestaat alleen voor teamleden (mensen), niet voor hun agents.
+    check:
+      - user: agent:dossierassistent
+        object: dossier:2026-0142
+        context:
+          huidige_tijd: "2026-06-01T12:00:00Z"
+        assertions:
+          besluit_nemen: false
+      - user: gebruiker:sanne
+        object: dossier:2026-0142
+        assertions:
+          besluit_nemen: true
+          lezen: true
+  - name: tool_toegestaan
+    description: Toegestane tools per agent; archiefbot heeft geen notitie_toevoegen.
+    check:
+      - user: agent:dossierassistent
+        object: tool:notitie_toevoegen
+        assertions:
+          toegestaan: true
+      - user: agent:archiefbot
+        object: tool:notitie_toevoegen
+        assertions:
+          toegestaan: false
+  - name: verlopen_agent_geen_toegang
+    description: Na de vervaldatum weigert de conditie, ook zonder dat het register iets heeft gedaan.
+    check:
+      - user: agent:archiefbot
+        object: dossier:2026-0301
+        context:
+          huidige_tijd: "2026-01-15T12:00:00Z"
+        assertions:
+          lezen: true
+      - user: agent:archiefbot
+        object: dossier:2026-0301
+        context:
+          huidige_tijd: "2026-02-01T00:00:01Z"
+        assertions:
+          lezen: false
+  - name: eigenaar_relatie_is_governance
+    description: agent#eigenaar zegt wie verantwoordelijk is; dat geeft op zichzelf geen dossiertoegang.
+    check:
+      - user: gebruiker:sanne
+        object: agent:dossierassistent
+        assertions:
+          eigenaar: true
+      - user: gebruiker:kees
+        object: agent:dossierassistent
+        assertions:
+          eigenaar: false
+    list_objects:
+      - user: gebruiker:sanne
+        type: agent
+        assertions:
+          eigenaar:
+            - agent:dossierassistent
