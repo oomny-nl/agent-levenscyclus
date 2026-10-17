@@ -121,15 +121,24 @@ def sub_uit_assertie(token: str) -> str:
         claims = jwt.decode(token, options={"verify_signature": False})
     except jwt.PyJWTError as fout:
         raise AssertieFout("assertie_ongeldig", f"assertie onleesbaar: {fout}") from fout
-    if header.get("alg") != ALG:
-        raise AssertieFout("assertie_ongeldig", f"alg moet {ALG} zijn")
+    _controleer_header(header)
     sub = claims.get("sub")
     if not isinstance(sub, str) or not sub or claims.get("iss") != sub:
         raise AssertieFout("assertie_ongeldig", "iss en sub moeten aanwezig en gelijk zijn")
     return sub
 
 
-def _controleer_claims(claims: dict[str, Any], max_skew: int) -> None:
+def _controleer_header(header: dict[str, Any]) -> None:
+    if header.get("alg") != ALG:
+        raise AssertieFout("assertie_ongeldig", f"alg moet {ALG} zijn")
+    if header.get("typ") != "JWT":
+        raise AssertieFout("assertie_ongeldig", "typ moet JWT zijn")
+
+
+def _controleer_claims(claims: dict[str, Any], aud: str, max_skew: int) -> None:
+    # PyJWT accepteert ook een lijst die `aud` bevat; het profiel eist precies één URL.
+    if not isinstance(claims["aud"], str) or claims["aud"] != aud:
+        raise AssertieFout("assertie_ongeldig", "aud moet precies de URL van de poort zijn")
     if claims["iss"] != claims["sub"]:
         raise AssertieFout("assertie_ongeldig", "iss en sub verschillen")
     if claims["iat"] > time.time() + max_skew:
@@ -157,6 +166,10 @@ def verifieer_assertie(token: str, jwk: str, aud: str, max_skew: int) -> dict[st
         AssertieFout: Bij elke afwijking van het profiel.
     """
     try:
+        _controleer_header(jwt.get_unverified_header(token))
+    except jwt.PyJWTError as fout:
+        raise AssertieFout("assertie_ongeldig", f"assertie onleesbaar: {fout}") from fout
+    try:
         sleutel = ECAlgorithm.from_jwk(jwk)
         if not isinstance(sleutel, EllipticCurvePublicKey):
             raise AssertieFout("assertie_ongeldig", "publiekeSleutel is geen publieke sleutel")
@@ -174,7 +187,7 @@ def verifieer_assertie(token: str, jwk: str, aud: str, max_skew: int) -> dict[st
         raise AssertieFout("assertie_ongeldig", f"assertie ongeldig: {fout}") from fout
     except ValueError as fout:
         raise AssertieFout("assertie_ongeldig", f"sleutel onbruikbaar: {fout}") from fout
-    _controleer_claims(claims, max_skew)
+    _controleer_claims(claims, aud, max_skew)
     jti = claims["jti"]
     if not isinstance(jti, str) or not JTI_MIN <= len(jti) <= JTI_MAX:
         raise AssertieFout("assertie_ongeldig", f"jti moet {JTI_MIN} tot {JTI_MAX} tekens zijn")

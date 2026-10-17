@@ -117,3 +117,19 @@ def test_alg_none_geweigerd(paar: Sleutelpaar) -> None:
 
 def test_andere_sleutel(paar: Sleutelpaar) -> None:
     assert _code(_token(Sleutelpaar.nieuw()), paar) == "assertie_ongeldig"
+
+
+@pytest.mark.parametrize("typ", [None, "at+jwt"])
+def test_typ_moet_jwt_zijn(paar: Sleutelpaar, typ: str | None) -> None:
+    nu = int(time.time())
+    claims = {"iss": SUB, "sub": SUB, "aud": AUD, "iat": nu, "exp": nu + 60, "jti": "x" * 24}
+    token = jwt.encode(claims, paar.prive, algorithm=ALG, headers={"typ": typ})
+    assert _code(token, paar) == "assertie_ongeldig"
+    with pytest.raises(AssertieFout):
+        sub_uit_assertie(token)
+
+
+def test_aud_als_lijst_geweigerd(paar: Sleutelpaar) -> None:
+    # PyJWT accepteert een lijst die de audience bevat; het profiel eist één exacte URL.
+    assert _code(_token(paar, aud=[AUD, "http://elders.test"]), paar) == "assertie_ongeldig"
+    assert _code(_token(paar, aud=[AUD]), paar) == "assertie_ongeldig"
