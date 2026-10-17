@@ -571,9 +571,8 @@ manipulatieproef.
 ## 6. Dreigingsmodel
 
 `docs/DREIGINGSMODEL.md`: per risico uit OWASP NHI Top 10 (2025) en OWASP Top 10 for Agentic
-Applications (2026) de status "gepland" (met testnaam; wordt "bewezen" zodra de test in de repo
-staat en faalt als de maatregel wegvalt), "gedeeltelijk" of "buiten scope", plus de nagespeelde
-aanvallen.
+Applications (2026) de status "bewezen" (met de test die in CI draait), "gedeeltelijk" of
+"buiten scope", plus de nagespeelde aanvallen.
 
 ## 7. Wat dit niet oplost
 
