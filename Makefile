@@ -22,11 +22,19 @@ up: .env
 speel:
 	@$(COMPOSE) run --rm demo
 
-## integratie: alle integratietests tegen de echte keten
+PYTEST := pytest -m integratie -p no:cacheprovider
+
+## integratie: alle integratietests tegen de echte keten, de netwerkgrens vanuit de
+## demo-container en herstel na een herstart van OpenFGA (in-memory: store en tuples weg)
 integratie: .env
 	$(DOWN)
 	$(COMPOSE) up -d --build --wait
 	$(COMPOSE) run --rm tests
+	$(COMPOSE) run --rm -e DEMO_NETWERKTEST=1 demo $(PYTEST) tests/integratie/test_netwerkgrens.py
+	$(COMPOSE) run --rm -e STOREVERLIES_FASE=voor tests $(PYTEST) tests/integratie/test_storeverlies.py
+	$(COMPOSE) restart openfga
+	$(COMPOSE) up -d --wait openfga
+	$(COMPOSE) run --rm -e STOREVERLIES_FASE=na tests $(PYTEST) tests/integratie/test_storeverlies.py
 
 ## test: unittests op de host
 test:

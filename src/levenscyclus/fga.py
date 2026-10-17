@@ -125,15 +125,6 @@ async def _schrijf_model(url: str, api_token: str, store_id: str, model: dict[st
     return str(antwoord.json()["authorization_model_id"])
 
 
-async def verwijder_store(url: str, api_token: str, store_id: str) -> None:
-    """Verwijder een store (alleen voor tests: simuleert verlies van de in-memory datastore)."""
-    try:
-        async with OpenFgaClient(_configuratie(url, api_token, FgaIds(store_id, ""))) as client:
-            await client.delete_store()
-    except ApiException as fout:
-        raise FgaFout(f"OpenFGA-store verwijderen mislukt: {fout}") from fout
-
-
 class Fga:
     """OpenFGA-toegang voor register en poort.
 

@@ -17,6 +17,6 @@ COPY tests ./tests
 COPY openfga ./openfga
 RUN uv sync --frozen --group dev --all-extras \
     && useradd --uid 10001 --no-create-home app \
-    && mkdir -p /data /geheimen /anker \
-    && chown app /data /geheimen /anker
+    && mkdir -p /data /geheimen /anker /proef \
+    && chown app /data /geheimen /anker /proef
 USER 10001

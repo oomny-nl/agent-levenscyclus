@@ -114,6 +114,7 @@ services:
       - geheimen:/geheimen:ro
       - anker:/anker:ro
       - data:/data:ro
+      - proef:/proef
     networks: [intern, front]
     depends_on:
       poort:
@@ -128,3 +129,4 @@ volumes:
   data:
   anker:
   poortdata:
+  proef:
