@@ -208,7 +208,9 @@ class Motor:
                 "agent": agent["id"],
                 "agent_naam": agent["userName"],
                 "eigenaar": ext(agent)["eigenaar"]["value"],
-                "eigenaar_naam": eigenaar["userName"] if eigenaar else None,
+                "eigenaar_naam": (eigenaar.get("displayName") or eigenaar["userName"])
+                if eigenaar
+                else None,
                 "actor": actor,
                 "reden": reden,
                 "status": ext(agent).get("levenscyclusStatus"),

@@ -39,7 +39,8 @@ from levenscyclus.klok import iso, parse_tijd
 from levenscyclus.logboek import controleer_keten
 from levenscyclus.poort.gegevens import TEAM_INKOMEN, TEAM_ZORG
 
-console = Console(width=int(os.environ.get("DEMO_BREEDTE", "100")), highlight=False)
+console = Console(width=int(os.environ.get("DEMO_BREEDTE", "120")), highlight=False)
+REDENBREEDTE = 28
 VERTRAGING = float(os.environ.get("DEMO_TEMPO", "0"))
 VERBODEN_INHOUD = "P. de Wit"  # aanvrager van 2026-0301: mag nooit bij Sannes agent terechtkomen
 GEBEURTENISSEN: list[dict[str, Any]] = []
@@ -92,8 +93,12 @@ class Regie:
         bron: SCIM-client van HR.
         beheerder_scim: SCIM-client van de functioneel beheerder (agents).
         beheer: Beheer-API-client.
+        sessies: Houdt de MCP-sessies van de agents open tot het einde van de demo.
         mensen: `userName` naar SCIM-id.
         agents: `userName` naar (SCIM-id, sleutelpaar).
+        open_sessies: Lopende MCP-sessie per agent; een agent werkt in één lange sessie, zodat
+            een latere weigering als `tools/call` in het logboek staat (`initialize` en
+            `tools/list` worden per ontwerp niet gelogd).
         na_lezen: Eenmalige haak die na het eerstvolgende gelezen dossier loopt (scenario 4).
     """
 
@@ -102,8 +107,10 @@ class Regie:
     beheerder_scim: Scim
     beheer: Beheer
     beheerder_token: str
+    sessies: AsyncExitStack
     mensen: dict[str, str] = field(default_factory=dict)
     agents: dict[str, tuple[str, Sleutelpaar]] = field(default_factory=dict)
+    open_sessies: dict[str, Gereedschap] = field(default_factory=dict)
     na_lezen: Callable[[], None] | None = None
 
     def waarnemer(self, g: dict[str, Any]) -> None:
@@ -234,13 +241,18 @@ def _auth(regie: Regie, naam: str) -> AgentAuth:
     return AgentAuth(paar, agent_id, regie.inst.poort_url, regie.inst.assertie_geldigheid)
 
 
-async def _met_agent(
-    regie: Regie, naam: str, stack: AsyncExitStack, tool: str, dossier: str
-) -> Gereedschap | None:
-    """Open de sessie; weigert de poort al bij `initialize`, meld dat als geweigerde toolcall."""
+async def _sessie(regie: Regie, naam: str, tool: str, dossier: str) -> Gereedschap | None:
+    """De lopende sessie van de agent, of een nieuwe.
+
+    Weigert de poort al bij `initialize` (de agent is nog niet bevestigd), dan meldt de regie dat
+    als geweigerde toolcall; zo'n weigering staat niet in het logboek, want protocolverzoeken
+    worden niet gelogd.
+    """
+    if naam in regie.open_sessies:
+        return regie.open_sessies[naam]
     auth = _auth(regie, naam)
     try:
-        client = await stack.enter_async_context(verbind(regie.inst.poort_url, auth))
+        client = await regie.sessies.enter_async_context(verbind(regie.inst.poort_url, auth))
     except BaseException as fout:
         if not weigering_in(fout):
             raise
@@ -256,32 +268,29 @@ async def _met_agent(
             }
         )
         return None
-    return Gereedschap(client, auth, regie.waarnemer)
+    regie.open_sessies[naam] = Gereedschap(client, auth, regie.waarnemer)
+    return regie.open_sessies[naam]
 
 
 async def toolcall(regie: Regie, agent: str, tool: str, dossier: str, **argumenten: str) -> str:
     """Eén losse toolcall buiten een opdracht (voor de statuscontroles)."""
-    async with AsyncExitStack() as stack:
-        gereedschap = await _met_agent(regie, agent, stack, tool, dossier)
-        if gereedschap is None:
-            return ""
-        bericht = await gereedschap.voer_uit(tool, {"dossier": dossier, **argumenten})
-        return str(bericht.content)
-    return ""
+    gereedschap = await _sessie(regie, agent, tool, dossier)
+    if gereedschap is None:
+        return ""
+    bericht = await gereedschap.voer_uit(tool, {"dossier": dossier, **argumenten})
+    return str(bericht.content)
 
 
 async def opdracht(regie: Regie, agent: str, eigenaar: str, tekst: str) -> list[str]:
     """Laat een agent een opdracht uitvoeren; geeft de toolresultaten terug."""
     zeg(eigenaar.capitalize(), f"opdracht aan {agent}: {tekst}")
-    async with AsyncExitStack() as stack:
-        gereedschap = await _met_agent(regie, agent, stack, "dossier_lezen", tekst)
-        if gereedschap is None:
-            return []
-        functies = await toolschemas(gereedschap.client) if not deterministisch() else []
-        graaf = bouw_graaf(kies_planner(functies), gereedschap)
-        berichten = await voer_opdracht_uit(graaf, tekst)
-        return [str(b.content) for b in berichten if getattr(b, "type", "") == "tool"]
-    return []
+    gereedschap = await _sessie(regie, agent, "dossier_lezen", tekst)
+    if gereedschap is None:
+        return []
+    functies = await toolschemas(gereedschap.client) if not deterministisch() else []
+    graaf = bouw_graaf(kies_planner(functies), gereedschap)
+    berichten = await voer_opdracht_uit(graaf, tekst)
+    return [str(b.content) for b in berichten if getattr(b, "type", "") == "tool"]
 
 
 # Scenario's ---------------------------------------------------------------------------------------
@@ -476,7 +485,7 @@ async def scenario_verlopen(regie: Regie) -> None:
 def _rij(r: dict[str, Any]) -> tuple[str, ...] | None:
     if r["soort"] == "scim" and r.get("uitkomst") == "ok":
         return None
-    tijd = datetime.fromisoformat(r["tijd"]).strftime("%d-%m %H:%M")
+    tijd = datetime.fromisoformat(r["tijd"]).astimezone().strftime("%d-%m %H:%M")
     if r["soort"] == "toolcall":
         actie, uitkomst = str(r["tool"]), str(r["beslissing"])
     elif r["soort"] == "levenscyclus":
@@ -490,7 +499,7 @@ def _rij(r: dict[str, Any]) -> tuple[str, ...] | None:
         actie,
         str(r.get("dossier") or ""),
         uitkomst,
-        str(r.get("reden") or "")[:34],
+        str(r.get("reden") or "")[:REDENBREEDTE],
     )
 
 
@@ -498,15 +507,15 @@ def bewijstabel(regie: Regie) -> None:
     """Toon het logboek als bewijstabel; controleer keten en anker; doe de manipulatieproef."""
     console.rule("[bold]Bewijs: het geketende logboek van het register")
     records = regie.beheer.logboek()
-    tabel = Table(box=None, header_style="bold", pad_edge=False)
+    tabel = Table(box=None, header_style="bold", pad_edge=False, collapse_padding=True)
     for kolom, breedte in (
         ("tijd", 11),
         ("agent", 16),
         ("eigenaar", 14),
-        ("gebeurtenis/tool", 26),
+        ("gebeurtenis/tool", 22),
         ("dossier", 9),
         ("uitkomst", 10),
-        ("reden", 34),
+        ("reden", REDENBREEDTE),
     ):
         tabel.add_column(kolom, min_width=breedte, max_width=breedte, no_wrap=True)
     for r in records:
@@ -541,30 +550,32 @@ async def hoofd() -> None:
     """Draai de volledige demo."""
     inst = Instellingen.uit_omgeving()
     beheerder = lees_token(inst.geheimen_dir / "beheerder.token")
-    regie = Regie(
-        inst,
-        Scim(inst.scim_url, lees_token(inst.geheimen_dir / "bron.token")),
-        Scim(inst.scim_url, beheerder),
-        Beheer(inst.register_url, beheerder),
-        beheerder,
-    )
-    ids = regie.beheer.openfga()
-    console.print(
-        Panel(
-            "[bold]Levenscyclus en governance van AI-agents als identiteiten[/bold]\n"
-            f"register {inst.register_url} (SCIM 2.0)  poort {inst.poort_url} (MCP)\n"
-            f"OpenFGA store {ids['store_id']}  "
-            f"planner: {os.environ.get('PLANNER', 'deterministisch')}",
-            expand=False,
+    async with AsyncExitStack() as sessies:
+        regie = Regie(
+            inst,
+            Scim(inst.scim_url, lees_token(inst.geheimen_dir / "bron.token")),
+            Scim(inst.scim_url, beheerder),
+            Beheer(inst.register_url, beheerder),
+            beheerder,
+            sessies,
         )
-    )
-    provisioneer_mensen(regie)
-    await scenario_joiner(regie)
-    await scenario_injectie(regie)
-    await scenario_mover(regie)
-    await scenario_leaver(regie)
-    await scenario_verlopen(regie)
-    bewijstabel(regie)
+        ids = regie.beheer.openfga()
+        console.print(
+            Panel(
+                "[bold]Levenscyclus en governance van AI-agents als identiteiten[/bold]\n"
+                f"register {inst.register_url} (SCIM 2.0)  poort {inst.poort_url} (MCP)\n"
+                f"OpenFGA store {ids['store_id']}  "
+                f"planner: {os.environ.get('PLANNER', 'deterministisch')}",
+                expand=False,
+            )
+        )
+        provisioneer_mensen(regie)
+        await scenario_joiner(regie)
+        await scenario_injectie(regie)
+        await scenario_mover(regie)
+        await scenario_leaver(regie)
+        await scenario_verlopen(regie)
+        bewijstabel(regie)
     console.print("[bold green]Alle scenario's gaven de uitkomst uit het ontwerp.[/bold green]")
 
 

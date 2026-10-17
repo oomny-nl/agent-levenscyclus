@@ -85,7 +85,7 @@ services:
     command: ["levenscyclus-demo"]
     environment:
       <<: *omgeving
-      DEMO_BREEDTE: ${DEMO_BREEDTE:-100}
+      DEMO_BREEDTE: ${DEMO_BREEDTE:-120}
       DEMO_TEMPO: ${DEMO_TEMPO:-0}
       PLANNER: ${PLANNER:-deterministisch}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
