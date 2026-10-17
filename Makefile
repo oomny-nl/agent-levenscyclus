@@ -23,8 +23,11 @@ speel:
 	@$(COMPOSE) run --rm demo
 
 ## opname: neem de demo op met VHS (demo/demo.tape) en maak er een gif van voor de README
+## vhs eindigt ook met 0 als de demo crasht: daarom controleert grep de tekstuitvoer van de opname.
 opname: up
 	vhs demo/demo.tape
+	grep -q "Alle scenario's gaven de uitkomst uit het ontwerp" demo/opname.txt
+	! grep -E -q "Traceback|wijkt af van het ontwerp" demo/opname.txt
 	timeout 600 ffmpeg -nostdin -y -loglevel error -i docs/beeld/demo.mp4 \
 		-vf "fps=6,scale=1100:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=24:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle" \
 		docs/beeld/demo.gif

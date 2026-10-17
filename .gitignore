@@ -15,5 +15,8 @@ data/
 *.pem
 *.key
 
+# Tekstuitvoer van make opname (controle, geen bron)
+demo/opname.txt
+
 # OS
 .DS_Store

@@ -1,6 +1,7 @@
 # Demo-opname met VHS (https://github.com/charmbracelet/vhs). Maak opnieuw met: make opname
 # De keten draait al (make opname start hem eerst met make up); de opname toont make speel.
 Output docs/beeld/demo.mp4
+Output demo/opname.txt
 Require docker
 Require make
 Set Shell "bash"
