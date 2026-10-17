@@ -613,8 +613,9 @@ Applications (2026) de status "bewezen" (met de test die in CI draait), "gedeelt
 - Gates: `ruff check`, `ruff format --check`, `ty check`, `pytest` (unit op de host, integratie in
   Compose tegen OpenFGA, register en poort), `fga model test` op `openfga/model.fga.yaml`,
   `fga model transform` ter controle dat `openfga/model.json` bij `openfga/model.fga` hoort,
-  gitleaks. CI start de hele keten met `docker compose up --wait`, draait de integratietests en
-  daarna `make demo`; een afwijking in de demo laat CI falen.
+  gitleaks. CI draait `make integratie` (integratietests in Compose, de netwerkgrens vanuit de
+  agentcontainer en herstel na een herstart van OpenFGA) en daarna `make demo`; een afwijking in de
+  demo laat CI falen.
 - Unit-tests mocken alleen de externe grenzen (OpenFGA, HTTP naar het register); de
   integratietests gebruiken de echte keten.
 - Geen secrets in git: tokens en sleutels ontstaan bij de eerste start in Docker-volumes; de
