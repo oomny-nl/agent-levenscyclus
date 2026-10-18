@@ -28,10 +28,10 @@ async def test_geweigerde_verbinding_wordt_fgafout() -> None:
         await fga.check("agent:a", "toegestaan", "tool:dossier_lezen")
     with pytest.raises(FgaFout, match="read mislukt"):
         await fga.lees("dossier:2026-0142")
-    with pytest.raises(FgaFout, match="list_objects mislukt"):
-        await fga.lees_als_user("gebruiker:x", "lid", "team")
+    with pytest.raises(FgaFout, match="read mislukt"):
+        await fga.lees_alles()
     with pytest.raises(FgaFout, match="write mislukt"):
-        await fga._schrijf({Tuple("gebruiker:x", "lid", "team:t")}, set())
+        await fga.verwijder({Tuple("gebruiker:x", "lid", "team:t")})
     with pytest.raises(FgaFout, match="store of model"):
         await zorg_store(url, "sleutel", "levenscyclus", {})
 

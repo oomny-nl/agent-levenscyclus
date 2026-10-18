@@ -46,14 +46,17 @@ class NepFga(Fga):
             raise FgaFout("OpenFGA onbereikbaar (test)")
 
     async def _lees(self, sleutel: ReadRequestTupleKey) -> set[Tuple]:
+        """Zoals de Read-API: zonder object (en dus zonder tuple key) de hele store."""
         self._grens()
-        obj = sleutel.object or ""
+        obj = sleutel.object
         return {
             t
             for t in self.tuples
             if (sleutel.user is None or t.user == sleutel.user)
             and (sleutel.relation is None or t.relation == sleutel.relation)
-            and (t.object.startswith(obj) if obj.endswith(":") else t.object == obj)
+            and (
+                obj is None or (t.object.startswith(obj) if obj.endswith(":") else t.object == obj)
+            )
         }
 
     async def _schrijf(self, toevoegen: set[Tuple], verwijderen: set[Tuple]) -> None:

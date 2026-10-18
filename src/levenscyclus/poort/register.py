@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 from urllib.parse import quote
@@ -64,12 +65,29 @@ class Register:
             raise RegisterFout(f"register gaf record {record.get('id')!r} voor id {id_!r}")
         return record if URN_AGENT in record and record.get("userType") == "agent" else None
 
-    async def groepen(self) -> dict[str, str]:
-        """Teamnaam (kleine letters) naar SCIM-id."""
-        antwoord = await self._get("/scim/v2/Groups", excludedAttributes="members")
+    async def team_id(self, naam: str) -> str | None:
+        """SCIM-id van de groep met deze `displayName`, of None als die groep niet bestaat.
+
+        Eén gefilterd verzoek, dus onafhankelijk van het aantal groepen en de paginering.
+        `displayName` is uniek en niet hoofdlettergevoelig (RFC 7643 §4.2, `uniqueness` server).
+
+        Raises:
+            RegisterFout: Bij een fout van het register, of als het meer dan één groep of een
+                groep met een andere naam teruggeeft.
+        """
+        antwoord = await self._get(
+            "/scim/v2/Groups",
+            filter=f"displayName eq {json.dumps(naam)}",
+            excludedAttributes="members",
+        )
         if antwoord.status_code != 200:
-            raise RegisterFout(f"register gaf {antwoord.status_code} bij het lezen van groepen")
-        return {g["displayName"].lower(): g["id"] for g in antwoord.json()["Resources"]}
+            raise RegisterFout(f"register gaf {antwoord.status_code} bij het zoeken van {naam!r}")
+        gevonden = antwoord.json().get("Resources", [])
+        if not gevonden:
+            return None
+        if len(gevonden) > 1 or gevonden[0].get("displayName", "").casefold() != naam.casefold():
+            raise RegisterFout(f"register gaf geen eenduidige groep voor {naam!r}")
+        return str(gevonden[0]["id"])
 
     async def openfga_ids(self) -> tuple[str, str]:
         """Store- en model-id; het register herstelt store en model als ze ontbreken."""

@@ -316,8 +316,9 @@ berekende relatie ervoor.
 
 Twee relaties over eigenaarschap, bewust verschillend:
 - `agent#eigenaar` is het governance-feit: wie is verantwoordelijk. Dit tuple bestaat zolang de
-  agent bestaat, ook als hij inactief is. De beheer-API gebruikt het voor het overzicht
-  (`ListObjects`: welke agents heeft Sanne).
+  agent bestaat, ook als hij inactief is. Het is de spiegel van het SCIM-attribuut `eigenaar`;
+  het beheeroverzicht leest dat attribuut rechtstreeks uit het register (SQLite), zodat het ook
+  werkt als OpenFGA even onbereikbaar is.
 - `gebruiker#agent` is de werkende delegatielijn met de conditie `niet_verlopen`
   (context `vervaldatum` in het tuple, `huidige_tijd` bij elke check). Dit tuple bestaat alleen
   zolang de agent `actief` is. Verloopt de vervaldatum, dan weigert OpenFGA ook als de controle nog
@@ -331,7 +332,7 @@ Tuples en hun eigenaar:
 | `agent:<id>#eigenaar@gebruiker:<id>` | register | bij aanmaken en bij wijziging van `eigenaar`; verwijderd bij `DELETE` |
 | `gebruiker:<id>#agent@agent:<id>` (conditie `niet_verlopen`, `vervaldatum`) | register | bij overgang naar `actief`; verwijderd bij elke andere status |
 | `tool:<naam>#toegestaan@agent:<id>` | register | bij overgang naar `actief`, uit `toegestaneTools`; verwijderd bij elke andere status |
-| `dossier:<nr>#team@team:<id>` | poort (de vakapplicatie weet van welk team een dossier is) | bij start, idempotent |
+| `dossier:<nr>#team@team:<id>` | poort (de vakapplicatie weet van welk team een dossier is) | bij de start en bij elke relatiecheck waarbij de SCIM-id van het team is veranderd (team opnieuw aangemaakt) of het team niet meer bestaat |
 
 Object-id's zijn de SCIM-`id`'s (onveranderlijk); `userName` staat in de auditrecords ernaast.
 Teams zijn SCIM-groepen; OpenFGA kent ze onder de SCIM-id van de groep.
@@ -346,8 +347,11 @@ worden gevonden: de toegangsrelaties van een agent zijn alle tuples met `user = 
 objecttypen `gebruiker` en `tool` (dus ook die op een vorige eigenaar of een ingetrokken tool); de
 teamlidmaatschappen van een eigenaar zijn alle tuples met `user = gebruiker:<id>` op het type `team`
 (dus ook een verwijderde of hernoemde groep). Een achtergebleven tuple uit een eerder mislukte stap
-wordt bij de volgende synchronisatie dus alsnog verwijderd, waar hij ook staat. De volgorde per
-overgang:
+wordt bij de volgende synchronisatie dus alsnog verwijderd, waar hij ook staat. Voor een
+verwijderde agent of medewerker is er geen volgende synchronisatie meer; mislukt de opruiming na
+de `DELETE` (gelogd als `tuples_niet_gesynchroniseerd`), dan leest de controle de hele store en
+verwijdert zij elke register-tuple waarvan de agent of medewerker niet meer in het register staat.
+De tuples van de poort (`dossier#team`) blijven daarbij buiten schot. De volgorde per overgang:
 
 - **Weg van `actief`** (mover, leaver, noodstop, configuratiewijziging, verval, niet bevestigd):
   eerst de status opslaan (de poort weigert vanaf dat moment), daarna de toegangsrelaties
@@ -381,8 +385,11 @@ dat beide gelijk zijn). Daarna herbouwt het alle register-tuples (teams, eigenar
 SCIM-records en vernieuwt het de store- en model-id's die `GET /openfga` teruggeeft. Na een herstart
 van OpenFGA (de datastore is in-memory, dus store, model en tuples zijn weg) weigert OpenFGA eerst
 (store onbekend), de poort dus ook; de eerstvolgende controle of `GET /openfga` herstelt. De
-dossierrelaties (`dossier#team`) zijn van de poort: die synchroniseert ze bij de start en opnieuw
-zodra zij bij een check een OpenFGA-fout krijgt. Zij haalt dan `GET /openfga` op (wat het herstel
+dossierrelaties (`dossier#team`) zijn van de poort: die synchroniseert ze bij de start, en vraagt
+bij elke relatiecheck met één gefilterd verzoek (`displayName eq "<team>"`, dus los van het aantal
+groepen) de actuele SCIM-id van het team op; is die veranderd, of bestaat het team niet meer, dan
+synchroniseert zij de relatie van dat dossier eerst. Ook synchroniseert zij opnieuw zodra zij bij
+een check een OpenFGA-fout krijgt. Zij haalt dan `GET /openfga` op (wat het herstel
 in het register afdwingt), synchroniseert haar dossiers tegen de nieuwe id's en herhaalt de check
 één keer; faalt ook die, dan weigert zij. Een aparte init-container is er niet.
 

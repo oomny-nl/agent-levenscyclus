@@ -19,7 +19,6 @@ from openfga_sdk import (
 )
 from openfga_sdk.client.models import (
     ClientCheckRequest,
-    ClientListObjectsRequest,
     ClientTuple,
     ClientWriteRequest,
 )
@@ -31,6 +30,8 @@ CONDITIE = "niet_verlopen"
 # van aiohttp ongewijzigd door (`openfga_sdk/rest.py`, `pool_manager.request`). Alle drie
 # betekenen: OpenFGA gaf geen bruikbaar antwoord.
 SDK_FOUTEN = (ApiException, aiohttp.ClientError, TimeoutError)
+# OpenFGA weigert standaard een write met meer dan 100 tuples (`maxTuplesPerWrite`).
+MAX_PER_WRITE = 100
 
 
 class FgaFout(Exception):
@@ -190,15 +191,9 @@ class Fga:
         """Alle tuples met dit subject op een objecttype, waar het object ook is."""
         return await self._lees(ReadRequestTupleKey(user=user, object=f"{objecttype}:"))
 
-    async def lees_als_user(self, user: str, relation: str, objecttype: str) -> set[str]:
-        """Objecten van een type waarop `user` deze relatie heeft (`ListObjects`)."""
-        verzoek = ClientListObjectsRequest(user=user, relation=relation, type=objecttype)
-        try:
-            async with OpenFgaClient(self._configuratie) as client:
-                antwoord = await client.list_objects(verzoek)
-        except SDK_FOUTEN as fout:
-            raise FgaFout(f"OpenFGA-list_objects mislukt: {fout}") from fout
-        return set(antwoord.objects or [])
+    async def lees_alles(self) -> set[Tuple]:
+        """Alle tuples in de store (een read zonder tuple key)."""
+        return await self._lees(ReadRequestTupleKey())
 
     async def synchroniseer(self, obj: str, relation: str, gewenst: set[Tuple]) -> bool:
         """Breng de tuples op `obj#relation` in de gewenste toestand en lees terug.
@@ -232,6 +227,12 @@ class Fga:
         if await self.lees_per_subject(user, objecttype) != gewenst:
             raise FgaFout(f"tuples van {user} op {objecttype} kloppen na synchronisatie niet")
         return bool(verwijderen or toevoegen)
+
+    async def verwijder(self, tuples: set[Tuple]) -> None:
+        """Verwijder deze tuples, in porties die OpenFGA in één write accepteert."""
+        geordend = sorted(tuples)
+        for begin in range(0, len(geordend), MAX_PER_WRITE):
+            await self._schrijf(set(), set(geordend[begin : begin + MAX_PER_WRITE]))
 
     async def verwijder_alles(self, obj: str) -> None:
         """Verwijder alle tuples op een object (bij `DELETE` van een agent)."""

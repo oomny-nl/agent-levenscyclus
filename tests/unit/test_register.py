@@ -42,6 +42,41 @@ async def test_bevestiging_zonder_sync_activeert_niet(register: Register) -> Non
     assert not any(t.user == f"agent:{agent}" for t in register.fga.tuples)
 
 
+async def test_controle_ruimt_tuples_van_verwijderde_agent_en_medewerker_op(
+    register: Register,
+) -> None:
+    eigenaar, team, agent = await _actieve_agent(register)
+    collega = await register.mens("collega")
+    await register.team("tweede", collega)
+    dossier = Tuple(f"team:{team}", "team", "dossier:2026-0142")  # van de poort
+    register.fga.tuples.add(dossier)
+    register.fga.faal = True
+    assert (
+        await register.verzoek("DELETE", f"/scim/v2/Users/{agent}", "beheerder")
+    ).status_code == 204
+    assert (
+        await register.verzoek("DELETE", f"/scim/v2/Users/{collega}", "bron")
+    ).status_code == 204
+    register.fga.faal = False
+
+    def van(id_: str) -> set[Tuple]:
+        return {
+            t
+            for t in register.fga.tuples
+            if id_ in (t.user.partition(":")[2], t.object.partition(":")[2])
+        }
+
+    # De opruiming na de DELETE mislukte; de herbouw per bestaande resource ziet ze niet meer.
+    assert len(van(agent)) == 3
+    assert len(van(collega)) == 1
+    assert register.gebeurtenissen(agent)[-1] == "tuples_niet_gesynchroniseerd"
+    await register.ok("POST", "/beheer/controle", "beheerder")
+    assert not van(agent)
+    assert not van(collega)
+    assert dossier in register.fga.tuples
+    assert Tuple(f"gebruiker:{eigenaar}", "lid", f"team:{team}") in register.fga.tuples
+
+
 async def test_mover_blokkeert_ook_zonder_openfga(register: Register) -> None:
     eigenaar, team, agent = await _actieve_agent(register)
     register.fga.faal = True

@@ -45,6 +45,14 @@ STATUSVELDEN = (
     "volgendeHerbeoordeling",
     "bevestigingsdeadline",
 )
+# Tuples die het register schrijft, met per relatie de kant waar de gebruiker of agent staat wiens
+# synchronisatie de tuple bezit. `dossier#team` is van de poort en valt erbuiten.
+REGISTER_TUPLES = {
+    ("gebruiker", "agent"): "user",
+    ("agent", "eigenaar"): "object",
+    ("team", "lid"): "user",
+    ("tool", "toegestaan"): "user",
+}
 
 
 @dataclass(frozen=True)
@@ -111,6 +119,14 @@ def _zet(e: dict[str, Any], status: str, reden: str, sinds: datetime) -> None:
     e["statusReden"] = reden
     e["statusSinds"] = iso(sinds)
     e.pop("bevestigingsdeadline", None)
+
+
+def bezitter(t: Tuple) -> str | None:
+    """Id van de gebruiker of agent die een register-tuple bezit; None voor andere tuples."""
+    kant = REGISTER_TUPLES.get((t.object.partition(":")[0], t.relation))
+    if kant is None:
+        return None
+    return (t.user if kant == "user" else t.object).partition(":")[2]
 
 
 def _gebeurtenis(status: str) -> str:
@@ -291,6 +307,23 @@ class Motor:
         for agent in self.opslag.agents():
             await self._sync_eigenaar(agent)
             await self._sync_toegang(agent)
+        await self._ruim_verweesde_tuples_op()
+
+    async def _ruim_verweesde_tuples_op(self) -> None:
+        """Verwijder register-tuples van een gebruiker of agent die niet meer bestaat.
+
+        De herbouw hierboven loopt alleen over bestaande resources; een opruiming die na een
+        `DELETE` mislukte, komt zo alsnog aan de beurt. Draait onder de proceslock van het
+        register, dus geen SCIM-mutatie loopt ertussen.
+        """
+        # ponytail: één read van de hele store per controle; ruim genoeg voor een register met
+        # duizenden tuples. Daarboven een duurzame verwijderopdracht (outbox) per DELETE.
+        tuples = await self.fga.lees_alles()
+        bestaand = {u["id"] for u in self.opslag.alle("User")}
+        verweesd = {t for t in tuples if (b := bezitter(t)) is not None and b not in bestaand}
+        if verweesd:
+            await self.fga.verwijder(verweesd)
+            log.warning("%d verweesde tuples opgeruimd", len(verweesd))
 
     # Joiner -----------------------------------------------------------------------------------
 
@@ -513,7 +546,9 @@ class Motor:
             await self.fga.synchroniseer_subject(subject, "tool", set())
             await self.fga.verwijder_alles(subject)
         except FgaFout as fout:
+            # De eerstvolgende controle ruimt ze alsnog op (`_ruim_verweesde_tuples_op`).
             log.error("tuples van verwijderde agent niet opgeruimd: %s", fout)
+            self._log_levenscyclus(agent, "tuples_niet_gesynchroniseerd", "register", str(fout))
 
     # Controle en toelating --------------------------------------------------------------------
 

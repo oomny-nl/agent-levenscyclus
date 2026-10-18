@@ -19,13 +19,16 @@ import pytest
 from starlette.testclient import TestClient
 
 from levenscyclus.assertie import Sleutelpaar
+from levenscyclus.fga import Tuple
 from levenscyclus.poort.app import maak_app
 from levenscyclus.poort.opslag import PoortOpslag
 from levenscyclus.poort.register import Register
 from levenscyclus.poort.toegang import STAPPEN, Toegang, _record
 from levenscyclus.register import app as register_app
+from levenscyclus.register.app import maak_app as maak_registerapp
 from levenscyclus.register.scim import URN_AGENT
 from tests.unit.conftest import NepFga, instellingen
+from tests.unit.conftest import Register as Registerproef
 
 # Een id zoals het register hem uitgeeft (`str(uuid.uuid4())`).
 AGENT = "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b"
@@ -38,7 +41,7 @@ class NepRegister:
     """Het register zoals de poort het via HTTP ziet.
 
     `onbereikbaar` laat het lezen van records falen, `logboek` stuurt het antwoord op het
-    logboekrecord.
+    logboekrecord, `teams` is de SCIM-id per groepsnaam.
     """
 
     paar: Sleutelpaar
@@ -47,6 +50,7 @@ class NepRegister:
     ander_id: bool = False
     gelogd: list[dict[str, Any]] = field(default_factory=list)
     paden: list[str] = field(default_factory=list)
+    teams: dict[str, str] = field(default_factory=lambda: {"werk-en-inkomen": "t1", "zorg": "t2"})
 
     def agentrecord(self) -> dict[str, Any]:
         return {
@@ -75,11 +79,9 @@ class NepRegister:
                 record["id"] = "0e0e0e0e-0000-4000-8000-000000000000"
             return httpx2.Response(200, json=record)
         if pad == "/scim/v2/Groups":
-            teams = [
-                {"id": "t1", "displayName": "werk-en-inkomen"},
-                {"id": "t2", "displayName": "zorg"},
-            ]
-            return httpx2.Response(200, json={"Resources": teams})
+            naam = json.loads(request.url.params["filter"].removeprefix("displayName eq "))
+            teams = [{"id": self.teams[naam], "displayName": naam}] if naam in self.teams else []
+            return httpx2.Response(200, json={"totalResults": len(teams), "Resources": teams})
         if pad == "/openfga":
             return httpx2.Response(200, json={"store_id": "store", "model_id": "model"})
         if pad == "/logboek" and request.method == "POST":
@@ -154,6 +156,37 @@ def test_toegestane_toolcall_voert_uit(proef: Proef) -> None:
     assert antwoord.status_code == 200, antwoord.text
     assert len(proef.opslag.notities(DOSSIER)) == 1
     assert proef.register.gelogd[-1]["beslissing"] == "toegestaan"
+
+
+def test_vervangen_team_krijgt_de_dossierrelatie(proef: Proef) -> None:
+    def dossierrelatie() -> set[Tuple]:
+        return {t for t in proef.fga.tuples if t.object == f"dossier:{DOSSIER}"}
+
+    assert proef.notitie().status_code == 200
+    assert dossierrelatie() == {Tuple("team:t1", "team", f"dossier:{DOSSIER}")}
+    # Team verwijderd en opnieuw aangemaakt: een nieuwe SCIM-id, de relatie verhuist mee.
+    proef.register.teams["werk-en-inkomen"] = "t9"
+    assert proef.notitie().status_code == 200
+    assert dossierrelatie() == {Tuple("team:t9", "team", f"dossier:{DOSSIER}")}
+    # Team weg: het dossier houdt geen relatie met een team dat niet meer bestaat.
+    del proef.register.teams["werk-en-inkomen"]
+    proef.notitie()
+    assert dossierrelatie() == set()
+
+
+async def test_team_buiten_de_eerste_groepenpagina_gevonden(register: Registerproef) -> None:
+    for i in range(120):
+        await register.team(f"team-{i:03}")
+    gezocht = await register.team("Werk-en-Inkomen")
+    client = Register("http://register.test", register.tokens["poort"])
+    client._http = httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=maak_registerapp(register.dienst)),
+        base_url="http://register.test",
+        headers={"Authorization": f"Bearer {register.tokens['poort']}"},
+    )
+    # De standaardpagina telt honderd groepen; de gezochte is de 121e.
+    assert await client.team_id("werk-en-inkomen") == gezocht
+    assert await client.team_id("bestaat-niet") is None
 
 
 def test_register_onbereikbaar_faalt_dicht(proef: Proef) -> None:

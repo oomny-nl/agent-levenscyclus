@@ -83,7 +83,7 @@ class Toegang:
         self.register = register
         self.fga = fga
         self.opslag = opslag
-        self._dossierteams: dict[str, str] = {}
+        self._dossierteams: dict[str, str | None] = {}
 
     # Stap 1 en 2 ------------------------------------------------------------------------------
 
@@ -166,8 +166,7 @@ class Toegang:
         if not dossier or dossier not in DOSSIERS:
             raise Geweigerd("relatie", "dossier_onbekend", f"dossier {dossier!r} bestaat niet", 403)
         try:
-            if dossier not in self._dossierteams:
-                await self.sync_dossiers()
+            await self._koppel_dossier(dossier)
             toegestaan = await self._check(
                 f"agent:{agent.id}",
                 relatie,
@@ -188,16 +187,23 @@ class Toegang:
     # Dossierrelaties en herstel ---------------------------------------------------------------
 
     async def sync_dossiers(self) -> None:
-        """`dossier#team` voor elk dossier waarvan het team als SCIM-groep bestaat (idempotent)."""
-        groepen = await self.register.groepen()
-        for nr, dossier in DOSSIERS.items():
-            team_id = groepen.get(dossier["team"].lower())
-            if team_id is None:
-                continue
-            await self.fga.synchroniseer(
-                f"dossier:{nr}", "team", {Tuple(f"team:{team_id}", "team", f"dossier:{nr}")}
-            )
-            self._dossierteams[nr] = team_id
+        """`dossier#team` voor elk dossier gelijk aan het huidige team (idempotent)."""
+        for nr in DOSSIERS:
+            await self._koppel_dossier(nr)
+
+    async def _koppel_dossier(self, nr: str) -> None:
+        """Breng `dossier#team` van één dossier in lijn met de huidige SCIM-id van zijn team.
+
+        Een team dat wordt verwijderd en opnieuw aangemaakt, krijgt een nieuwe id. De poort vraagt
+        die id daarom bij elke relatiecheck op en schrijft alleen bij een verschil. Bestaat het
+        team niet, dan heeft het dossier geen teamrelatie en weigert de check.
+        """
+        team_id = await self.register.team_id(DOSSIERS[nr]["team"])
+        if nr in self._dossierteams and self._dossierteams[nr] == team_id:
+            return
+        gewenst = {Tuple(f"team:{team_id}", "team", f"dossier:{nr}")} if team_id else set()
+        await self.fga.synchroniseer(f"dossier:{nr}", "team", gewenst)
+        self._dossierteams[nr] = team_id
 
     async def herstel(self) -> None:
         """Haal nieuwe id's bij het register (dat herstelt store en model); herschrijf dossiers."""
