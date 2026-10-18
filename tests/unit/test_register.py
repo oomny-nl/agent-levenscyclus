@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+
 from levenscyclus.fga import Tuple
 from levenscyclus.klok import iso, parse_tijd
 from levenscyclus.register.motor import effectief
@@ -186,3 +188,58 @@ async def test_bevestiging_synchroniseert_teams(register: Register) -> None:
     }
     assert achtergebleven.object not in teams
     assert len(teams) == 1
+
+
+async def _niet_herbeoordeeld(register: Register, controle: bool) -> tuple[str, str, str]:
+    """Actieve agent waarvan de bevestigingstermijn na de herbeoordeling al is verstreken.
+
+    Opgeslagen staat hij nog op `actief`, effectief is hij `gedeactiveerd`; met `controle` heeft de
+    controle dat al opgeslagen.
+    """
+    eigenaar, team, agent = await _actieve_agent(
+        register, herbeoordelingTermijn="P1D", bevestigingstermijn="P1D"
+    )
+    register.dienst.klok.zet_vooruit(timedelta(days=3))
+    if controle:
+        await register.ok("POST", "/beheer/controle", "beheerder")
+    verwacht = "gedeactiveerd" if controle else "actief"
+    assert register.opgeslagen(agent)["levenscyclusStatus"] == verwacht
+    return eigenaar, team, agent
+
+
+def _status(register: Register, agent: str) -> tuple[object, object]:
+    e = register.opgeslagen(agent)
+    return e["levenscyclusStatus"], e["statusReden"]
+
+
+@pytest.mark.parametrize("controle", [False, True])
+async def test_groepswijziging_heractiveert_een_verlopen_bevestiging_niet(
+    register: Register, controle: bool
+) -> None:
+    eigenaar, team, agent = await _niet_herbeoordeeld(register, controle)
+    verwijder = [{"op": "remove", "path": f'members[value eq "{eigenaar}"]'}]
+    assert (await register.patch(f"/scim/v2/Groups/{team}", "bron", verwijder)).status_code == 200
+    assert _status(register, agent) == ("gedeactiveerd", "niet_herbeoordeeld")
+    assert (await register.bevestig(agent)).status_code == 409
+
+
+@pytest.mark.parametrize("controle", [False, True])
+async def test_configuratiewijziging_heractiveert_een_verlopen_bevestiging_niet(
+    register: Register, controle: bool
+) -> None:
+    _, _, agent = await _niet_herbeoordeeld(register, controle)
+    tools = [{"op": "replace", "path": f"{URN_AGENT}:toegestaneTools", "value": ["dossier_lezen"]}]
+    assert (await register.patch(f"/scim/v2/Users/{agent}", "beheerder", tools)).status_code == 200
+    assert _status(register, agent) == ("gedeactiveerd", "niet_herbeoordeeld")
+    assert (await register.bevestig(agent)).status_code == 409
+
+
+@pytest.mark.parametrize("controle", [False, True])
+async def test_leaver_laat_een_verlopen_agent_verlopen(register: Register, controle: bool) -> None:
+    eigenaar, _, agent = await _actieve_agent(register, dagen=1)
+    register.dienst.klok.zet_vooruit(timedelta(days=2))
+    if controle:
+        await register.ok("POST", "/beheer/controle", "beheerder")
+    uit = [{"op": "replace", "path": "active", "value": False}]
+    assert (await register.patch(f"/scim/v2/Users/{eigenaar}", "bron", uit)).status_code == 200
+    assert _status(register, agent) == ("verlopen", "vervaldatum_bereikt")

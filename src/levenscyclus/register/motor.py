@@ -364,7 +364,7 @@ class Motor:
         gewijzigd = oude_leden ^ nieuwe_leden
         reden = "eigenaar_van_team_gewisseld"
         getroffen = []
-        for agent in self._agents_van(gewijzigd):
+        for agent in map(self._actueel, self._agents_van(gewijzigd)):
             status = ext(agent).get("levenscyclusStatus")
             if status == ACTIEF:
                 getroffen.append(self._bewaar_status(agent, HERBEOORDELING, reden, "bron"))
@@ -401,7 +401,7 @@ class Motor:
             return []
         return [
             self._bewaar_status(agent, GEDEACTIVEERD, "eigenaar_vertrokken", "bron")
-            for agent in self._agents_van({oud["id"]})
+            for agent in map(self._actueel, self._agents_van({oud["id"]}))
             if ext(agent).get("levenscyclusStatus") in INGESCHAKELD and not is_noodstop(agent)
         ]
 
@@ -423,6 +423,7 @@ class Motor:
         van de beheerder (None als hij `active` niet zet); hij wordt nooit afgeleid uit een
         verschil tussen opgeslagen en effectieve toestand.
         """
+        oud = self._actueel(oud)
         oe, ne = ext(oud), ext(nieuw)
         for sleutel in STATUSVELDEN:
             if sleutel in oe:
@@ -489,14 +490,25 @@ class Motor:
 
     # Controle en toelating --------------------------------------------------------------------
 
-    def _maak_persistent(self, agent: dict[str, Any]) -> Overgang | None:
+    def _actueel(self, agent: dict[str, Any]) -> dict[str, Any]:
+        """De agent met een al ingetreden tijdregel opgeslagen, vóór een gebeurtenis erop inwerkt.
+
+        Zo bouwt een groepswijziging, leaver of beheerderswijziging voort op de effectieve status:
+        een agent die al is verlopen of gedeactiveerd, komt niet terug in `herbeoordeling_vereist`,
+        en de uitkomst hangt niet af van of de controle al heeft gedraaid.
+        """
+        return self._maak_persistent(agent, "register")[0]
+
+    def _maak_persistent(
+        self, agent: dict[str, Any], actor: str = "controle"
+    ) -> tuple[dict[str, Any], Overgang | None]:
         eff = ext(self.effectief(agent))
         e = ext(agent)
         if (eff["levenscyclusStatus"], eff["statusReden"]) == (
             e.get("levenscyclusStatus"),
             e.get("statusReden"),
         ):
-            return None
+            return agent, None
         van = str(e.get("levenscyclusStatus"))
         for sleutel in ("levenscyclusStatus", "statusReden", "statusSinds"):
             e[sleutel] = eff[sleutel]
@@ -510,11 +522,11 @@ class Motor:
             self._log_levenscyclus(
                 opgeslagen,
                 _gebeurtenis(eff["levenscyclusStatus"]),
-                "controle",
+                actor,
                 eff["statusReden"],
                 van=van,
             )
-        return Overgang(
+        return opgeslagen, Overgang(
             agent["id"],
             agent["userName"],
             van,
@@ -525,7 +537,7 @@ class Motor:
 
     def maak_persistent(self) -> list[Overgang]:
         """Maak de effectieve status van elke agent persistent en log elke overgang."""
-        overgangen = [self._maak_persistent(agent) for agent in self.opslag.agents()]
+        overgangen = [self._maak_persistent(agent)[1] for agent in self.opslag.agents()]
         return [o for o in overgangen if o is not None]
 
     async def controle(self) -> list[Overgang]:
