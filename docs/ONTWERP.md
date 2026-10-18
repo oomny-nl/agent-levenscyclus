@@ -66,17 +66,15 @@ tokendeel bewust niet opnieuw.
 
 ```mermaid
 flowchart LR
-    HR[HR / IdP\nSCIM-client «bron»] -->|Users, Groups| R
-    FB[Functioneel beheerder\nCLI] -->|agents, controle, overzicht| R
-    E[Eigenaar\nSanne, Kees] -->|bevestiging| R
-    subgraph intern[netwerk intern]
-        subgraph R[register: SCIM 2.0-server + levenscyclusmotor + logboek]
-            S[(SQLite: SCIM-resources,\nlogboek-hashketen)]
-        end
+    HR["HR / IdP<br/>SCIM-client (bron)"] -->|Users, Groups| R
+    FB["Functioneel beheerder<br/>CLI"] -->|agents, controle, overzicht| R
+    E["Eigenaar<br/>Sanne, Kees"] -->|bevestiging| R
+    subgraph intern["netwerk intern"]
+        R["register<br/>SCIM 2.0-server, levenscyclusmotor, logboek"] --- S[("SQLite: SCIM-resources,<br/>logboek-hashketen")]
         R -->|relatietuples, preshared key| F[(OpenFGA)]
         P -->|check, preshared key| F
     end
-    A[Agent\nLangGraph + MCP-client\neigen sleutel] -->|tools/call + agent-assertie| P[poort: MCP-gateway\ndossier-API]
+    A["Agent<br/>LangGraph + MCP-client<br/>eigen sleutel"] -->|tools/call + agent-assertie| P["poort<br/>MCP-gateway + dossier-API"]
     P -->|GET /scim/v2/Users/id| R
     P -->|POST /logboek| R
     R -.->|ankerbestand| K[(apart volume)]
@@ -238,11 +236,11 @@ overgang verhoogt `meta.version`, zodat een lopende toolcall op de oude versie s
 | Verval | tijdregel 2 | `verlopen` (`vervaldatum_bereikt`), `active=false`, toegangsrelaties verwijderd bij de controle; de poort en de OpenFGA-conditie weigeren al eerder |
 | Noodstop | beheerder, `PATCH active=false` | `gedeactiveerd` (`uitgeschakeld_door_beheerder`), dominant; ook op een al gedeactiveerde agent en na een leaver |
 | Heractivering | beheerder, `PATCH active=true` | alleen als de agent effectief niet is ingeschakeld en de eigenaar bestaat en actief is (`409` anders): `herbeoordeling_vereist` (`heractiveerd_door_beheerder`) |
+| Verwijderd | beheerder, `DELETE /Users/{id}` | alle tuples van de agent verwijderd (ook `agent#eigenaar`), gelogd `verwijderd` |
 
 Noodstop en heractivering volgen alleen een expliciete opdracht: een PATCH-operatie op `active`,
 of een `PUT` waarvan `active` afwijkt van de effectieve waarde. Wie een gelezen record (met de
 afgeleide `active`) ongewijzigd terugschrijft of alleen een ander attribuut wijzigt, schakelt niets.
-| Verwijderd | beheerder, `DELETE /Users/{id}` | alle tuples van de agent verwijderd (ook `agent#eigenaar`), gelogd `verwijderd` |
 
 Twee soorten relaties in OpenFGA (zie 4.3): **toegangsrelaties** (`gebruiker#agent`,
 `tool#toegestaan`) bestaan alleen zolang de agent `actief` is; de **governance-relatie**

@@ -11,7 +11,9 @@ FGA_CLI := openfga/cli:v0.8.2@sha256:31a565d14d1c5ca8170d3a2225eb66517d9f4905399
 	printf 'OPENFGA_PRESHARED_KEY=%s\n' "$$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" >> .env
 
 ## demo: start de keten schoon en speel de vijf scenario's af (één commando)
-demo: up speel
+# Eerst `up`, dan pas `speel`: ook met `make -j` start de demo niet tegen een halve keten
+demo: up
+	@$(MAKE) --no-print-directory speel
 
 ## up: start OpenFGA, register en poort vanuit een schone toestand
 up: .env
@@ -28,7 +30,7 @@ opname: up
 	vhs demo/demo.tape
 	grep -q "Alle scenario's gaven de uitkomst uit het ontwerp" demo/opname.txt
 	! grep -E -q "Traceback|wijkt af van het ontwerp" demo/opname.txt
-	timeout 600 ffmpeg -nostdin -y -loglevel error -i docs/beeld/demo.mp4 \
+	ffmpeg -nostdin -y -loglevel error -i docs/beeld/demo.mp4 \
 		-vf "fps=6,scale=1100:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=24:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle" \
 		docs/beeld/demo.gif
 

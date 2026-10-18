@@ -14,7 +14,7 @@ verzonnen.
 
 ![Demo-opname: joiner, prompt-injectie geweigerd, mover, leaver en verlopen agent, met het geketende logboek als bewijs](docs/beeld/demo.gif)
 
-De opname toont `make demo`: vijf scenario's tegen de echte keten en daarna het logboek als bewijs. Opnieuw opnemen: `make opname` (vereist [VHS](https://github.com/charmbracelet/vhs) en ffmpeg).
+De opname toont `make speel` op een gestarte keten (`make demo` doet `make up` en `make speel` in één keer): vijf scenario's tegen de echte keten en daarna het logboek als bewijs. Opnieuw opnemen: `make opname` (vereist [VHS](https://github.com/charmbracelet/vhs) en ffmpeg).
 
 ## Wat dit bewijst
 
@@ -46,7 +46,7 @@ flowchart LR
     A["Agent<br/>LangGraph + MCP-client<br/>eigen sleutel"] -->|"tools/call + agent-assertie"| P
     P -->|GET /scim/v2/Users/id| R
     P -->|POST /logboek| R
-    subgraph intern["netwerk intern: alleen register en poort"]
+    subgraph intern["netwerk intern"]
         F[("OpenFGA")]
     end
     R -->|relatietuples, preshared key| F
