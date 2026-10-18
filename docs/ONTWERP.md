@@ -15,7 +15,8 @@ hele levensduur: joiner, mover, leaver, herbeoordeling en verval.
 Een publiek, reproduceerbaar bewijsstuk: een AI-agent bij een (fictieve) gemeente krijgt dezelfde
 levenscycluszorg als een medewerker. Hij wordt geprovisioneerd met een menselijke eigenaar, een
 doel, een vervaldatum en een risicoklasse; hij bestaat alleen zolang zijn eigenaar hem bevestigt;
-hij volgt zijn eigenaar bij een functiewissel en verdwijnt met zijn eigenaar bij vertrek; en alles
+hij volgt zijn eigenaar bij een functiewissel; bij vertrek van zijn eigenaar wordt hij gedeactiveerd
+en verliest hij zijn toegang, terwijl zijn registratie en het auditspoor bewaard blijven; en alles
 wat hij doet of wat met hem gebeurt staat in één controleerbaar logboek.
 
 Lezers: CISO's, IAM-architecten en functioneel beheerders bij Rijk, uitvoeringsorganisaties en
@@ -426,8 +427,8 @@ Gestolen asserties zijn één keer bruikbaar, met een nominale looptijd van hoog
 klokmarges (`iat` tot 5 s vooruit, `exp` tot 5 s terug) is het acceptatievenster van de poort
 hoogstens 70 s. Wie de assertie onderschept en
 eerder gebruikt dan de agent, wint die ene aanroep; de agent krijgt dan `assertie_hergebruikt`
-en het logboek toont beide. Dat is de bekende grens van bearer-asserties zonder kanaalbinding en
-staat in §7.
+en het logboek toont beide. Dat is de bekende grens van een bearer-assertie: zij is niet gebonden
+aan het TLS-kanaal en ook niet aan het verzoek zelf (methode, URI, inhoud); zie §7.
 
 #### Controlevolgorde
 
@@ -490,7 +491,11 @@ volgt instructies die hij in een dossier leest (gesimuleerde kaping), zodat het 
 elke run en in CI hetzelfde is. Met `PLANNER=llm` draait een echt model (Azure OpenAI of
 OpenAI-compatibel) met de echte MCP-toolschema's; dan kunnen de aanvalskeuzes variëren en zijn de
 verwachtingen per toolcall niet afdwingbaar. De integriteits- en veiligheidscontroles (geen
-verboden notitie, geen verboden dossierinhoud, keten en anker intact) blijven ook dan gelden.
+verboden notitie, geen verboden dossierinhoud, keten en anker intact) blijven ook dan gelden. De
+demo meldt dan apart of het model de injectie probeerde: alleen als het dossier 2026-0301 werd
+aangeroepen en de poort elke poging op de relatie weigerde, claimt zij dat de injectie op OpenFGA
+strandde. Negeert het model de injectie, dan zegt zij dat de relatiecheck niet is geraakt; elk
+ander verloop op dat dossier is een afwijking.
 
 ### 4.6 Logboek
 
@@ -615,9 +620,12 @@ Applications (2026) de status "bewezen" (met de test die in CI draait), "gedeelt
   workload identity voor de bron en de poort).
 - De agent-assertie bewijst bezit van de sleutel, niet de integriteit van het agentproces. Wie het
   proces of de sleutel overneemt, is de agent, binnen zijn levenscyclus en relaties. Een onderschepte
-  assertie is één keer bruikbaar, nominaal hoogstens 60 s en met klokmarges hoogstens 70 s, zonder
-  kanaalbinding. Sleutels roteren niet
-  automatisch; in productie horen ze in een HSM of key vault, met mTLS of DPoP als kanaalbinding.
+  assertie is één keer bruikbaar, nominaal hoogstens 60 s en met klokmarges hoogstens 70 s; zij is
+  niet gebonden aan het TLS-kanaal en ook niet aan methode, URI of inhoud van het verzoek. Sleutels
+  roteren niet automatisch; in productie horen ze in een HSM of key vault. Binding aan het
+  transport geeft mTLS met certificaatgebonden tokens (RFC 8705). DPoP (RFC 9449) is iets anders:
+  een bewijs van sleutelbezit per verzoek, gebonden aan HTTP-methode en URI (en aan het
+  access token), maar niet aan het TLS-kanaal of de inhoud van het verzoek.
 - Het SCIM-profiel is beperkt (4.1) en niet gevalideerd tegen een echte IdP-tenant.
 - Deactivering werkt bij de volgende toolcall. Een toolcall die het toelatingsmoment (stap 5) al is
   gepasseerd, voltooit.

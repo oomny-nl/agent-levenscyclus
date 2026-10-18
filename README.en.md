@@ -4,9 +4,10 @@
 
 An AI agent is an identity with an owner and an expiry date. This repository shows that an agent
 can get the same lifecycle care as an employee: it is provisioned with a human owner, a purpose, an
-expiry date and a risk class. It exists only as long as its owner confirms it, follows its owner
-when they change jobs and disappears with its owner when they leave. Everything it does and
-everything that happens to it is recorded in one verifiable log.
+expiry date and a risk class. It exists only as long as its owner confirms it and follows its
+owner when they change jobs. When the owner leaves, the agent is deactivated and loses its access;
+its registration and audit trail are kept. Everything it does and everything that happens to it
+is recorded in one verifiable log.
 
 The scenario takes place in the fictional municipality of Lindevoort. All names, case files and
 content are made up. The code, logs and identifiers are in Dutch.
@@ -75,7 +76,7 @@ make demo
 `make demo` creates a `.env` with a fresh OpenFGA key (never in git), starts the stack from scratch
 and plays the five scenarios. It then shows the evidence table from the log, the chain and anchor
 check, and a tampering test. The command exits with code 0 when every outcome matches the design;
-CI runs it on every push.
+CI runs it on every pull request and every push to `main`.
 
 ## The scenarios
 

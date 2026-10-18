@@ -37,12 +37,17 @@ opname: up
 PYTEST := pytest -m integratie -p no:cacheprovider
 
 ## integratie: alle integratietests tegen de echte keten, de netwerkgrens vanuit de
-## demo-container en herstel na een herstart van OpenFGA (in-memory: store en tuples weg)
+## demo-container en herstel na een herstart van OpenFGA (in-memory: store en tuples weg).
+## OPENFGA_IP is het interne adres van OpenFGA volgens Docker: de tests-container moet het bereiken,
+## de demo-container niet (ook niet zonder DNS).
 integratie: .env
 	$(DOWN)
 	$(COMPOSE) up -d --build --wait
-	$(COMPOSE) run --rm tests
-	$(COMPOSE) run --rm -e DEMO_NETWERKTEST=1 demo $(PYTEST) tests/integratie/test_netwerkgrens.py
+	ip=$$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+		$$($(COMPOSE) ps -q openfga)) && test -n "$$ip" && \
+	$(COMPOSE) run --rm -e OPENFGA_IP=$$ip tests && \
+	$(COMPOSE) run --rm -e OPENFGA_IP=$$ip -e DEMO_NETWERKTEST=1 demo \
+		$(PYTEST) tests/integratie/test_netwerkgrens.py
 	$(COMPOSE) run --rm -e STOREVERLIES_FASE=voor tests $(PYTEST) tests/integratie/test_storeverlies.py
 	$(COMPOSE) restart openfga
 	$(COMPOSE) up -d --wait openfga
