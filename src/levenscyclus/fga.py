@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import aiohttp
 import httpx2
 from openfga_sdk import (
     ClientConfiguration,
@@ -26,6 +27,10 @@ from openfga_sdk.credentials import CredentialConfiguration, Credentials
 from openfga_sdk.exceptions import ApiException
 
 CONDITIE = "niet_verlopen"
+# De SDK zet een HTTP-foutstatus om in `ApiException`, maar laat verbindingsfouten en time-outs
+# van aiohttp ongewijzigd door (`openfga_sdk/rest.py`, `pool_manager.request`). Alle drie
+# betekenen: OpenFGA gaf geen bruikbaar antwoord.
+SDK_FOUTEN = (ApiException, aiohttp.ClientError, TimeoutError)
 
 
 class FgaFout(Exception):
@@ -102,7 +107,7 @@ async def zorg_store(url: str, api_token: str, storenaam: str, model: dict[str, 
             bestaand = await client.read_latest_authorization_model()
             if bestaand.authorization_model is not None:
                 return FgaIds(store_id, bestaand.authorization_model.id)
-    except ApiException as fout:
+    except SDK_FOUTEN as fout:
         raise FgaFout(f"OpenFGA onbereikbaar of fout bij store of model: {fout}") from fout
     return FgaIds(store_id, await _schrijf_model(url, api_token, store_id, model))
 
@@ -155,7 +160,7 @@ class Fga:
         try:
             async with OpenFgaClient(self._configuratie) as client:
                 antwoord = await client.check(verzoek)
-        except ApiException as fout:
+        except SDK_FOUTEN as fout:
             raise FgaFout(f"OpenFGA-check mislukt: {fout}") from fout
         return bool(antwoord.allowed)
 
@@ -178,7 +183,7 @@ class Fga:
                     vervolg = antwoord.continuation_token or None
                     if not vervolg:
                         return gevonden
-        except ApiException as fout:
+        except SDK_FOUTEN as fout:
             raise FgaFout(f"OpenFGA-read mislukt: {fout}") from fout
 
     async def lees_per_subject(self, user: str, objecttype: str) -> set[Tuple]:
@@ -191,7 +196,7 @@ class Fga:
         try:
             async with OpenFgaClient(self._configuratie) as client:
                 antwoord = await client.list_objects(verzoek)
-        except ApiException as fout:
+        except SDK_FOUTEN as fout:
             raise FgaFout(f"OpenFGA-list_objects mislukt: {fout}") from fout
         return set(antwoord.objects or [])
 
@@ -242,7 +247,7 @@ class Fga:
         try:
             async with OpenFgaClient(self._configuratie) as client:
                 await client.write(verzoek)
-        except ApiException as fout:
+        except SDK_FOUTEN as fout:
             raise FgaFout(f"OpenFGA-write mislukt: {fout}") from fout
 
 

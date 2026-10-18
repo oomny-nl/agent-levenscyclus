@@ -7,12 +7,14 @@ register is een `MockTransport` en OpenFGA de `NepFga`.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import httpx2
+import jwt
 import pytest
 from starlette.testclient import TestClient
 
@@ -25,8 +27,10 @@ from levenscyclus.register import app as register_app
 from levenscyclus.register.scim import URN_AGENT
 from tests.unit.conftest import NepFga, instellingen
 
-AGENT = "agent-1"
+# Een id zoals het register hem uitgeeft (`str(uuid.uuid4())`).
+AGENT = "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b"
 DOSSIER = "2026-0142"
+AUD = "http://poort.test/mcp"
 
 
 @dataclass
@@ -40,7 +44,9 @@ class NepRegister:
     paar: Sleutelpaar
     onbereikbaar: bool = False
     logboek: str = "201"
+    ander_id: bool = False
     gelogd: list[dict[str, Any]] = field(default_factory=list)
+    paden: list[str] = field(default_factory=list)
 
     def agentrecord(self) -> dict[str, Any]:
         return {
@@ -60,10 +66,14 @@ class NepRegister:
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         pad = request.url.path
+        self.paden.append(request.url.raw_path.decode())
         if self.onbereikbaar and pad.startswith("/scim/"):
             raise httpx2.ConnectError("register weg (test)", request=request)
         if pad == f"/scim/v2/Users/{AGENT}":
-            return httpx2.Response(200, json=self.agentrecord())
+            record = self.agentrecord()
+            if self.ander_id:
+                record["id"] = "0e0e0e0e-0000-4000-8000-000000000000"
+            return httpx2.Response(200, json=record)
         if pad == "/scim/v2/Groups":
             teams = [
                 {"id": "t1", "displayName": "werk-en-inkomen"},
@@ -103,7 +113,7 @@ class Proef:
     opslag: PoortOpslag
     paar: Sleutelpaar
 
-    def notitie(self) -> httpx2.Response:
+    def notitie(self, assertie: str | None = None) -> httpx2.Response:
         bericht = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -114,7 +124,7 @@ class Proef:
             },
         }
         koppen = {
-            "Authorization": f"Bearer {self.paar.assertie(AGENT, 'http://poort.test/mcp')}",
+            "Authorization": f"Bearer {assertie or self.paar.assertie(AGENT, AUD)}",
             "Accept": "application/json, text/event-stream",
         }
         return self.client.post("/mcp", json=bericht, headers=koppen)
@@ -208,6 +218,42 @@ def test_toolcall_record_volgt_het_registerschema() -> None:
     assert set(record) == set(register_app.TOOLCALL_VELDEN)
     assert STAPPEN == register_app.STAPPEN
     assert register_app._valideer_toolcall(record) == record
+
+
+def _assertie(proef: Proef, sub: str = AGENT, **claims: Any) -> str:
+    nu = int(time.time())
+    basis = {"iss": sub, "sub": sub, "aud": AUD, "iat": nu, "exp": nu + 30, "jti": "j" * 24}
+    return jwt.encode(
+        {**basis, **claims}, proef.paar.prive, algorithm="ES256", headers={"typ": "JWT"}
+    )
+
+
+def test_tijdclaim_als_string_wordt_gelogde_weigering(proef: Proef) -> None:
+    antwoord = proef.notitie(_assertie(proef, iat=f"{int(time.time())}"))
+    assert antwoord.status_code == 401
+    assert 'error="assertie_ongeldig"' in _code(antwoord)
+    record = proef.register.gelogd[-1]
+    assert (record["reden"], record["controles"]["assertie"]) == ("assertie_ongeldig", "geweigerd")
+
+
+@pytest.mark.parametrize(
+    "sub", ["../../../openfga", "x?filter=1", "x/../y", AGENT.upper(), "{" + AGENT + "}", "agent-1"]
+)
+def test_sub_buiten_de_idvorm_bereikt_het_register_niet(proef: Proef, sub: str) -> None:
+    proef.register.paden.clear()
+    antwoord = proef.notitie(_assertie(proef, sub))
+    assert antwoord.status_code == 401
+    assert 'error="agent_onbekend"' in _code(antwoord)
+    assert proef.register.paden == ["/logboek"]
+    assert proef.opslag.notities(DOSSIER) == []
+
+
+def test_register_met_ander_record_faalt_dicht(proef: Proef) -> None:
+    proef.register.ander_id = True
+    antwoord = proef.notitie()
+    assert antwoord.status_code == 503
+    assert proef.opslag.notities(DOSSIER) == []
+    assert proef.register.gelogd[-1]["controles"]["assertie"] == "geweigerd"
 
 
 def test_jti_overleeft_herstart(tmp_path: Path) -> None:

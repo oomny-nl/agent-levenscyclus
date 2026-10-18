@@ -144,7 +144,7 @@ URI, in productie neem je een eigen namespace). Attributen:
 | `vervaldatum` | dateTime | readWrite, verplicht | Harde einddatum, moet bij aanmaak in de toekomst liggen; daarna is de agent `verlopen` en kan alleen de beheerder een nieuwe datum zetten |
 | `risicoklasse` | string, canoniek `laag`, `midden`, `hoog` | readWrite, verplicht | Bepaalt in productie termijnen en goedkeuringseisen; in de demo informatief en in het overzicht |
 | `toegestaneTools` | multi-valued string | readWrite | Tools die de agent mag aanroepen; het register schrijft ze als relaties naar OpenFGA |
-| `publiekeSleutel` | string (JWK als JSON) | readWrite, verplicht | Publieke sleutel (P-256, `alg` ES256) waarmee de agent zich bij de poort identificeert |
+| `publiekeSleutel` | string (JWK als JSON) | readWrite, verplicht | Publieke sleutel (P-256, `alg` ES256) waarmee de agent zich bij de poort identificeert. Het register bouwt de sleutel bij provisioning op en weigert een onbruikbare JWK met `400 invalidValue` (zie §4.4, Handtekening) |
 | `herbeoordelingTermijn` | string, duur | readWrite | Hoe lang een bevestiging geldig is (standaard `P90D`) |
 | `bevestigingstermijn` | string, duur | readWrite | Hoe lang de eigenaar na "herbeoordeling vereist" heeft om te bevestigen (standaard `P14D`) |
 | `levenscyclusStatus` | string | readOnly | `herbeoordeling_vereist`, `actief`, `gedeactiveerd`, `verlopen`; effectieve status op het moment van lezen (zie 4.2) |
@@ -162,9 +162,10 @@ Duren zijn een beperkte ISO 8601-vorm: alleen weken, dagen, uren, minuten en sec
 Het kernattribuut `active` van een agent is de administratieve inschakeling door de beheerder, niet
 de effectieve toegang: `true` bij `actief` en `herbeoordeling_vereist`, `false` bij `gedeactiveerd`
 en `verlopen`. Een `PATCH active=false` door de beheerder is de noodstop
-(`uitgeschakeld_door_beheerder`); `active=true` heractiveert niet rechtstreeks maar zet
-`herbeoordeling_vereist`: de eigenaar moet opnieuw ja zeggen. Effectieve toegang vereist altijd
-`levenscyclusStatus == actief`.
+(`uitgeschakeld_door_beheerder`), ook al bij aanmaak: een agent die met `active=false` wordt
+aangemaakt, is meteen `gedeactiveerd` en de eigenaar kan hem niet bevestigen. `active=true`
+heractiveert niet rechtstreeks maar zet `herbeoordeling_vereist`: de eigenaar moet opnieuw ja
+zeggen. Effectieve toegang vereist altijd `levenscyclusStatus == actief`.
 
 #### Rolscheiding
 
@@ -233,7 +234,7 @@ overgang verhoogt `meta.version`, zodat een lopende toolcall op de oude versie s
 
 | Gebeurtenis | Bron | Gevolg voor de agents van de eigenaar |
 |---|---|---|
-| Joiner: agent aangemaakt | beheerder, `POST /Users` | `herbeoordeling_vereist` (`wacht_op_eigenaar`), `bevestigingsdeadline = nu + bevestigingstermijn`; geen toegang tot de eigenaar bevestigt. Geweigerd (`400`) als de vervaldatum niet in de toekomst ligt, een termijn ongeldig is, of de eigenaar ontbreekt, inactief is of een agent is |
+| Joiner: agent aangemaakt | beheerder, `POST /Users` | `herbeoordeling_vereist` (`wacht_op_eigenaar`), `bevestigingsdeadline = nu + bevestigingstermijn`; geen toegang tot de eigenaar bevestigt. Met `active=false` in de `POST`: `gedeactiveerd` (`uitgeschakeld_door_beheerder`), zie Noodstop. Geweigerd (`400`) als de vervaldatum niet in de toekomst ligt, een termijn ongeldig is, of de eigenaar ontbreekt, inactief is of een agent is |
 | Bevestiging | eigenaar, `POST /beheer/agents/{id}/bevestiging` | `actief`, `laatsteBevestiging = nu`, `bevestigdeVersie = meta.version`; toegangsrelaties gesynchroniseerd (zie 4.3) |
 | Mover: teamlidmaatschap van de eigenaar wijzigt feitelijk | bron, `PATCH`/`PUT`/`DELETE` op `/Groups` | teamrelaties in OpenFGA bijgewerkt (toegang tot oude teamdossiers verdwijnt direct); elke agent van een eigenaar wiens lidmaatschap feitelijk is veranderd: `herbeoordeling_vereist` (`eigenaar_van_team_gewisseld`). Een agent die al op bevestiging wachtte, houdt zijn deadline maar krijgt een nieuwe `meta.version`, zodat een vóór de wissel gelezen versie niet meer bevestigt. Een herhaalde identieke `PATCH` of een `PUT` met dezelfde leden verandert niets en dwingt geen beoordeling af |
 | Leaver: eigenaar `active=false` of verwijderd | bron | agent `gedeactiveerd` (`eigenaar_vertrokken`), `active=false`, toegangsrelaties verwijderd. Bij verwijderen haalt het register de medewerker ook uit elke groep (per groep gelogd als `lid_verwijderd`), zodat geen groep naar een niet-bestaande `User` verwijst |
@@ -260,8 +261,11 @@ Een bevestiging is alleen geldig als (1) het token van een eigenaar is, (2) die 
 SCIM-record de eigenaar van deze agent is, (3) de eigenaar zelf bestaat en actief is, (4) de
 effectieve status `herbeoordeling_vereist` of `actief` is (vernieuwen mag; `verlopen` en
 `gedeactiveerd` niet), (5) `vervaldatum > nu`, en (6) de body `{doel, versie}` het huidige `doel`
-en de huidige `meta.version` bevat (`409` bij een verouderde versie). De bevestiging legt doel en
-versie vast; zo kan niemand een inmiddels gewijzigde agent bevestigen op grond van oude gegevens.
+en de huidige `meta.version` bevat (`409` bij een verouderde versie). Zo kan niemand een
+inmiddels gewijzigde agent bevestigen op grond van oude gegevens. Het logboekrecord `bevestigd`
+legt vast wat er bevestigd is: `bevestigdeVersie` en `configuratie` (doel, vervaldatum, tools,
+publieke sleutel en beide termijnen, met de standaardtermijn ingevuld als de agent er geen heeft).
+Een latere wijziging van de resource verandert dat record niet.
 
 ### 4.3 Autorisatiemodel in OpenFGA
 
@@ -403,12 +407,12 @@ Eisen aan de assertie, alle verplicht, de eerste afwijking weigert met `401`:
 | Onderdeel | Eis |
 |---|---|
 | Header | `alg` precies `ES256`, `typ` `JWT`; `jku`, `x5u`, `x5c` en `kid` worden genegeerd: de sleutel komt uitsluitend uit het SCIM-record van `sub` |
-| `iss`, `sub` | aanwezig, gelijk aan elkaar en aan de SCIM-`id` van een bestaand record met `userType == agent` (een medewerker-id: `agent_onbekend`) |
+| `iss`, `sub` | aanwezig, gelijk aan elkaar en aan de SCIM-`id` van een bestaand record met `userType == agent` (een medewerker-id: `agent_onbekend`). Omdat `sub` vóór de handtekeningcontrole wordt gelezen, vraagt de poort alleen een `sub` in de vorm die het register uitgeeft (een UUID in canonieke schrijfwijze) op, als één gecodeerd padsegment; elke andere `sub` is `agent_onbekend` zonder verzoek aan het register. Geeft het register een record met een andere `id`, dan faalt de poort dicht |
 | `aud` | precies de canonieke URL van de poort |
-| `iat` | aanwezig; niet meer dan `max_skew` (5 s) in de toekomst |
-| `exp` | aanwezig; `0 < exp - iat ≤ 60` (nominale looptijd); `exp > nu - max_skew` |
+| `iat` | aanwezig, een getal (`NumericDate`, RFC 7519 §2; een string, boolean of niet-eindige waarde is `assertie_ongeldig`); niet meer dan `max_skew` (5 s) in de toekomst |
+| `exp` | aanwezig, een getal zoals `iat`; `0 < exp - iat ≤ 60` (nominale looptijd); `exp > nu - max_skew` |
 | `jti` | aanwezig, 16 tot 128 tekens; `(sub, jti)` wordt ná een geslaagde verificatie atomair gereserveerd in SQLite (`INSERT` met unieke sleutel); een tweede verzoek met dezelfde `jti`, ook gelijktijdig, krijgt `401 assertie_hergebruikt`. Reserveringen overleven een herstart van de poort en worden opgeruimd als `exp + max_skew` voorbij is |
-| Handtekening | ES256 met de P-256-sleutel uit `publiekeSleutel`; een JWK met ander `kty`/`crv` wordt al bij provisioning geweigerd |
+| Handtekening | ES256 met de P-256-sleutel uit `publiekeSleutel`. Het register bouwt die sleutel al bij provisioning op en weigert (`400 invalidValue`) een JWK met ander `kty`/`crv`, een privé-onderdeel, `x` of `y` die geen base64url-string van 32 bytes zijn of samen geen punt op de kromme vormen, en een `alg` of `use` anders dan `ES256` en `sig` |
 | Tijd | asserties worden tegen de echte klok van de poort gecontroleerd, niet tegen de demoklok (4.8) |
 
 Gestolen asserties zijn één keer bruikbaar, met een nominale looptijd van hoogstens 60 s; met de
@@ -452,7 +456,8 @@ toelating op dat moment, niet dat de tool is voltooid; neveneffecten (welke noti
 dossierinhoud is teruggegeven) worden in demo en tests afzonderlijk gecontroleerd.
 
 `initialize` en `tools/list` vragen stap 1 en 2, niet 3 en 4. Is het register of OpenFGA
-onbereikbaar of geeft het een fout, dan weigert de poort (fail closed). De poort cachet niets van het
+onbereikbaar of geeft het een fout, dan weigert de poort (fail closed); bij OpenFGA telt daarbij
+naast een foutstatus ook een verbroken verbinding of time-out. De poort cachet niets van het
 SCIM-record. **Toelatingsmoment**: de toelating geldt voor één recordversie, gelezen in stap 1 en
 onder het mutatieslot bevestigd in stap 5. Elke relevante mutatie tussen die twee momenten (mover,
 leaver, eigenaarswissel, configuratiewijziging, noodstop, bevestiging, controle-overgang) verhoogt
@@ -489,7 +494,7 @@ van de tabel opvalt. Dit is het ontwerp uit agent-mandaat, hier met drie soorten
 
 | `soort` | Geschreven door | Velden |
 |---|---|---|
-| `levenscyclus` | register | `gebeurtenis` (aangemaakt, bevestigd, herbeoordeling_vereist, gedeactiveerd, verlopen, gewijzigd, verwijderd, noodstop, heractiveerd, tuples_niet_gesynchroniseerd), `agent`, `agent_naam`, `eigenaar`, `eigenaar_naam`, `actor` (bron, beheerder, eigenaar, controle), `reden` |
+| `levenscyclus` | register | `gebeurtenis` (aangemaakt, bevestigd, herbeoordeling_vereist, gedeactiveerd, verlopen, gewijzigd, verwijderd, noodstop, heractiveerd, tuples_niet_gesynchroniseerd), `agent`, `agent_naam`, `eigenaar`, `eigenaar_naam`, `actor` (bron, beheerder, eigenaar, controle), `reden`, `status`, `van` (vorige status); bij `bevestigd` ook `bevestigdeVersie` en `configuratie` (4.2) |
 | `scim` | register | `actor`, `operatie`, `resource`, `uitkomst` (ook geweigerde pogingen, zoals de bron die een agent aanmaakt) |
 | `toolcall` | poort via `POST /logboek` | `agent`, `agent_naam`, `eigenaar_naam`, `tool`, `dossier`, `beslissing`, `reden` (bij weigering, waaronder `toestand_gewijzigd` als het register de toelating onder het slot afwijst), `toelichting` (de concrete oorzaak bij `toestand_gewijzigd`), `controles` (uitkomst per stap of `niet_uitgevoerd`), `recordversie`, `jti` |
 

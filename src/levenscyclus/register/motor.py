@@ -178,9 +178,19 @@ class Motor:
     # Status opslaan ---------------------------------------------------------------------------
 
     def _bewaar_status(
-        self, agent: dict[str, Any], status: str, reden: str, actor: str, **velden: Any
+        self,
+        agent: dict[str, Any],
+        status: str,
+        reden: str,
+        actor: str,
+        *,
+        bewijs: dict[str, Any] | None = None,
+        **velden: Any,
     ) -> dict[str, Any]:
-        """Sla een nieuwe opgeslagen status op (versie omhoog) en log de overgang."""
+        """Sla een nieuwe opgeslagen status op (versie omhoog) en log de overgang.
+
+        `velden` komen in de extensie, `bewijs` alleen in het levenscyclusrecord.
+        """
         nu = self.klok.nu()
         e = ext(agent)
         van = e.get("levenscyclusStatus", "nieuw")
@@ -194,7 +204,9 @@ class Motor:
         agent["active"] = status in INGESCHAKELD
         with self.opslag.transactie():
             opgeslagen = self.opslag.vervang("User", agent["id"], agent, iso(nu))
-            self._log_levenscyclus(opgeslagen, _gebeurtenis(status), actor, reden, van=van)
+            self._log_levenscyclus(
+                opgeslagen, _gebeurtenis(status), actor, reden, van=van, **(bewijs or {})
+            )
         return opgeslagen
 
     def _log_levenscyclus(
@@ -283,9 +295,15 @@ class Motor:
     # Joiner -----------------------------------------------------------------------------------
 
     def registreer_aanmaak(self, agent: dict[str, Any], actor: str) -> dict[str, Any]:
-        """Joiner, in de transactie van de `POST`: status `herbeoordeling_vereist`."""
+        """Joiner, in de transactie van de `POST`: status `herbeoordeling_vereist`.
+
+        Een expliciete `active=false` is de noodstop vanaf het begin: de eigenaar kan zo'n agent
+        niet activeren; eerst moet de beheerder hem inschakelen.
+        """
         if parse_tijd(ext(agent)["vervaldatum"]) <= self.klok.nu():
             raise ScimFout(400, "vervaldatum moet in de toekomst liggen", "invalidValue")
+        if agent["active"] is False:
+            return self._bewaar_status(agent, GEDEACTIVEERD, NOODSTOP, actor)
         return self._bewaar_status(agent, HERBEOORDELING, "wacht_op_eigenaar", actor)
 
     async def sync_na_aanmaak(self, agent: dict[str, Any]) -> None:
@@ -344,10 +362,19 @@ class Motor:
             ACTIEF,
             "bevestigd_door_eigenaar",
             "eigenaar",
+            bewijs={"bevestigdeVersie": versie, "configuratie": self._configuratie(e)},
             laatsteBevestiging=iso(nu),
             bevestigdeVersie=versie,
             volgendeHerbeoordeling=iso(nu + termijn),
         )
+
+    def _configuratie(self, e: dict[str, Any]) -> dict[str, Any]:
+        """Wat de eigenaar bevestigt, met de standaardtermijnen ingevuld; voor het logboek."""
+        standaard = {
+            "herbeoordelingTermijn": self.instellingen.standaard_herbeoordeling,
+            "bevestigingstermijn": self.instellingen.standaard_bevestigingstermijn,
+        }
+        return {k: e.get(k, standaard.get(k)) for k in AGENT_CONFIGURATIE}
 
     # Mover ------------------------------------------------------------------------------------
 

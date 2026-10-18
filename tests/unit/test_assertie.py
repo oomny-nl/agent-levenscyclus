@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import secrets
 import time
+from collections.abc import Callable
 from typing import Any
 
 import jwt
@@ -15,6 +17,7 @@ from levenscyclus.assertie import (
     ALG,
     AssertieFout,
     Sleutelpaar,
+    controleer_jwk,
     sub_uit_assertie,
     verifieer_assertie,
 )
@@ -133,3 +136,52 @@ def test_aud_als_lijst_geweigerd(paar: Sleutelpaar) -> None:
     # PyJWT accepteert een lijst die de audience bevat; het profiel eist één exacte URL.
     assert _code(_token(paar, aud=[AUD, "http://elders.test"]), paar) == "assertie_ongeldig"
     assert _code(_token(paar, aud=[AUD]), paar) == "assertie_ongeldig"
+
+
+@pytest.mark.parametrize(
+    ("naam", "waarde"),
+    [
+        ("iat", lambda nu: f"{nu}"),
+        ("exp", lambda nu: f"{nu + 30}"),
+        ("iat", lambda _: True),
+        ("exp", lambda _: math.inf),
+        ("iat", lambda _: math.nan),
+    ],
+    ids=["iat-string", "exp-string", "iat-bool", "exp-oneindig", "iat-nan"],
+)
+def test_tijdclaims_moeten_getallen_zijn(
+    paar: Sleutelpaar, naam: str, waarde: Callable[[int], Any]
+) -> None:
+    # RFC 7519 §2 NumericDate; PyJWT laat een numerieke string door, het profiel niet.
+    token = _token(paar, **{naam: waarde(int(time.time()))})
+    assert _code(token, paar) == "assertie_ongeldig"
+
+
+def _b64url(gegevens: bytes) -> str:
+    return base64.urlsafe_b64encode(gegevens).rstrip(b"=").decode()
+
+
+@pytest.mark.parametrize(
+    ("afwijking", "melding"),
+    [
+        ({"x": 1, "y": 2}, "base64url"),
+        ({"x": "!!!", "y": "???"}, "geen geldige P-256"),
+        ({"x": _b64url(b"\x01" * 16)}, "geen geldige P-256"),
+        ({"y": _b64url(b"\x01" * 32)}, "geen geldige P-256"),
+        ({"alg": "RS256"}, "alg ES256"),
+        ({"use": "enc"}, "use sig"),
+        ({"d": _b64url(b"\x01" * 32)}, "privé"),
+    ],
+    ids=["numeriek", "geen-base64url", "te-kort", "niet-op-de-kromme", "alg", "use", "privé"],
+)
+def test_onbruikbare_jwk_geweigerd(
+    paar: Sleutelpaar, afwijking: dict[str, Any], melding: str
+) -> None:
+    jwk = {**json.loads(paar.publieke_jwk()), **afwijking}
+    with pytest.raises(ValueError, match=melding):
+        controleer_jwk(json.dumps(jwk))
+
+
+def test_jwk_zonder_alg_en_use_is_bruikbaar(paar: Sleutelpaar) -> None:
+    jwk = {k: v for k, v in json.loads(paar.publieke_jwk()).items() if k not in ("alg", "use")}
+    assert controleer_jwk(json.dumps(jwk)) == jwk

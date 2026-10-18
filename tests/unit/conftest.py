@@ -128,7 +128,9 @@ class Register:
         )
         return str(groep["id"])
 
-    async def agent(self, eigenaar: str, dagen: float = 30, **extra: Any) -> str:
+    async def agent(
+        self, eigenaar: str, dagen: float = 30, *, active: bool = True, **extra: Any
+    ) -> str:
         body = agentresource(
             f"agent-{len(self.tokens)}",
             eigenaar,
@@ -141,6 +143,8 @@ class Register:
                 **extra,
             },
         )
+        if not active:
+            body["active"] = False
         return str((await self.ok("POST", "/scim/v2/Users", "beheerder", body))["id"])
 
     async def record(self, id_: str) -> dict[str, Any]:

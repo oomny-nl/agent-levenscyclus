@@ -8,6 +8,7 @@ het SCIM-record van `sub`; headerverwijzingen (`jku`, `x5u`, `x5c`, `kid`) worde
 from __future__ import annotations
 
 import json
+import math
 import secrets
 import time
 from dataclasses import dataclass
@@ -88,14 +89,18 @@ class Sleutelpaar:
 
 
 def controleer_jwk(tekst: str) -> dict[str, Any]:
-    """Controleer dat een `publiekeSleutel` een publieke P-256-JWK is.
+    """Controleer dat een `publiekeSleutel` een bruikbare publieke P-256-JWK is.
+
+    De sleutel wordt echt opgebouwd (RFC 7518 §6.2.1): `x` en `y` moeten base64url-strings van
+    32 bytes zijn en samen een punt op de kromme vormen. `alg` en `use` zijn optioneel, maar als
+    ze er staan moeten ze `ES256` en `sig` zijn.
 
     Returns:
         De JWK als dict.
 
     Raises:
-        ValueError: Bij ongeldige JSON, een ander sleuteltype, een andere kromme of een
-            privé-onderdeel.
+        ValueError: Bij ongeldige JSON, een ander sleuteltype, een andere kromme, een
+            privé-onderdeel, onbruikbare coördinaten of tegenstrijdige metadata.
     """
     try:
         jwk = json.loads(tekst)
@@ -105,8 +110,16 @@ def controleer_jwk(tekst: str) -> dict[str, Any]:
         raise ValueError("publiekeSleutel moet een JWK zijn met kty EC en crv P-256")
     if "d" in jwk:
         raise ValueError("publiekeSleutel bevat een privé-onderdeel (d)")
-    if not jwk.get("x") or not jwk.get("y"):
-        raise ValueError("publiekeSleutel mist x of y")
+    if not all(isinstance(jwk.get(c), str) and jwk[c] for c in ("x", "y")):
+        raise ValueError("publiekeSleutel mist x of y (base64url-strings)")
+    if jwk.get("alg", ALG) != ALG or jwk.get("use", "sig") != "sig":
+        raise ValueError(f"publiekeSleutel is alleen bruikbaar met alg {ALG} en use sig")
+    try:
+        sleutel = ECAlgorithm.from_jwk(jwk)
+    except (jwt.InvalidKeyError, ValueError) as fout:
+        raise ValueError(f"publiekeSleutel is geen geldige P-256-sleutel: {fout}") from fout
+    if not isinstance(sleutel, EllipticCurvePublicKey):
+        raise ValueError("publiekeSleutel is geen publieke sleutel")
     return jwk
 
 
@@ -135,15 +148,28 @@ def _controleer_header(header: dict[str, Any]) -> None:
         raise AssertieFout("assertie_ongeldig", "typ moet JWT zijn")
 
 
+def _tijdstip(claims: dict[str, Any], naam: str) -> float:
+    """Een `NumericDate` (RFC 7519 §2): een eindig JSON-getal.
+
+    PyJWT laat bij `iat` en `exp` ook een numerieke string of een boolean door; daarmee rekenen
+    zou een `TypeError` geven in plaats van een gelogde weigering.
+    """
+    waarde = claims[naam]
+    if isinstance(waarde, bool) or not isinstance(waarde, int | float) or not math.isfinite(waarde):
+        raise AssertieFout("assertie_ongeldig", f"{naam} moet een getal zijn (NumericDate)")
+    return float(waarde)
+
+
 def _controleer_claims(claims: dict[str, Any], aud: str, max_skew: int) -> None:
     # PyJWT accepteert ook een lijst die `aud` bevat; het profiel eist precies één URL.
     if not isinstance(claims["aud"], str) or claims["aud"] != aud:
         raise AssertieFout("assertie_ongeldig", "aud moet precies de URL van de poort zijn")
     if claims["iss"] != claims["sub"]:
         raise AssertieFout("assertie_ongeldig", "iss en sub verschillen")
-    if claims["iat"] > time.time() + max_skew:
+    iat, exp = _tijdstip(claims, "iat"), _tijdstip(claims, "exp")
+    if iat > time.time() + max_skew:
         raise AssertieFout("assertie_ongeldig", "iat ligt in de toekomst")
-    duur = claims["exp"] - claims["iat"]
+    duur = exp - iat
     if not 0 < duur <= MAX_GELDIGHEID:
         raise AssertieFout(
             "assertie_ongeldig", f"exp - iat moet tussen 1 en {MAX_GELDIGHEID} s zijn"

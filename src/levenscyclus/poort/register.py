@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
+from urllib.parse import quote
 
 import httpx2
 
@@ -11,6 +13,14 @@ from levenscyclus.register.scim import URN_AGENT
 
 class RegisterFout(Exception):
     """Het register is onbereikbaar of gaf een onverwachte fout; de poort faalt dicht."""
+
+
+def _is_register_id(tekst: str) -> bool:
+    """Of `tekst` een SCIM-id is zoals het register die maakt (`str(uuid.uuid4())`)."""
+    try:
+        return str(uuid.UUID(tekst)) == tekst
+    except ValueError:
+        return False
 
 
 class Register:
@@ -34,13 +44,24 @@ class Register:
             raise RegisterFout(f"register onbereikbaar: {fout}") from fout
 
     async def haal_agent(self, id_: str) -> dict[str, Any] | None:
-        """Het SCIM-record van een agent met effectieve status, of None (onbekend of geen agent)."""
-        antwoord = await self._get(f"/scim/v2/Users/{id_}")
+        """Het SCIM-record van een agent met effectieve status, of None (onbekend of geen agent).
+
+        `id_` komt uit een nog niet geverifieerde assertie. Alleen de vorm die het register uitgeeft
+        (een UUID in canonieke schrijfwijze) leidt tot een verzoek, als één gecodeerd padsegment.
+
+        Raises:
+            RegisterFout: Bij een fout van het register of een record met een andere `id`.
+        """
+        if not _is_register_id(id_):
+            return None
+        antwoord = await self._get(f"/scim/v2/Users/{quote(id_, safe='')}")
         if antwoord.status_code == 404:
             return None
         if antwoord.status_code != 200:
             raise RegisterFout(f"register gaf {antwoord.status_code} bij het lezen van de agent")
         record = antwoord.json()
+        if record.get("id") != id_:
+            raise RegisterFout(f"register gaf record {record.get('id')!r} voor id {id_!r}")
         return record if URN_AGENT in record and record.get("userType") == "agent" else None
 
     async def groepen(self) -> dict[str, str]:

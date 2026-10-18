@@ -10,7 +10,7 @@ import pytest
 from levenscyclus.fga import Tuple
 from levenscyclus.klok import iso, parse_tijd
 from levenscyclus.register.motor import effectief
-from levenscyclus.register.scim import URN_AGENT
+from levenscyclus.register.scim import AGENT_CONFIGURATIE, URN_AGENT
 from tests.unit.conftest import Register
 
 
@@ -171,6 +171,61 @@ async def test_noodstop_dominant(register: Register) -> None:
         ), doel
     assert (await register.bevestig(agent)).status_code == 409
     assert eigenaar != nieuwe_eigenaar
+
+
+async def test_bevestiging_is_herleidbaar_na_een_latere_wijziging(register: Register) -> None:
+    eigenaar = await register.mens("sanne")
+    agent = await register.agent(eigenaar, toegestaneTools=["dossier_lezen", "notitie_toevoegen"])
+    gelezen = await register.record(agent)
+    assert (await register.bevestig(agent)).status_code == 200
+    antwoord = await register.patch(
+        f"/scim/v2/Users/{agent}",
+        "beheerder",
+        [
+            {"op": "replace", "path": f"{URN_AGENT}:doel", "value": "dossiers wijzigen"},
+            {"op": "replace", "path": f"{URN_AGENT}:toegestaneTools", "value": ["dossier_lezen"]},
+        ],
+    )
+    assert antwoord.status_code == 200
+    assert register.opgeslagen(agent)["doel"] == "dossiers wijzigen"
+
+    [bevestigd] = [
+        r
+        for r in register.dienst.opslag.logboek()
+        if r.get("agent") == agent and r.get("gebeurtenis") == "bevestigd"
+    ]
+    e, inst = _ext(gelezen), register.dienst.inst
+    assert bevestigd["bevestigdeVersie"] == gelezen["meta"]["version"]
+    assert bevestigd["configuratie"] == {
+        "doel": "dossiers samenvatten",
+        "vervaldatum": e["vervaldatum"],
+        "toegestaneTools": ["dossier_lezen", "notitie_toevoegen"],
+        "publiekeSleutel": e["publiekeSleutel"],
+        "herbeoordelingTermijn": inst.standaard_herbeoordeling,
+        "bevestigingstermijn": inst.standaard_bevestigingstermijn,
+    }
+    assert set(bevestigd["configuratie"]) == set(AGENT_CONFIGURATIE)
+
+
+async def test_uitgeschakeld_aangemaakte_agent_vraagt_eerst_de_beheerder(
+    register: Register,
+) -> None:
+    eigenaar = await register.mens("sanne")
+    agent = await register.agent(eigenaar, active=False)
+    record = await register.record(agent)
+    assert record["active"] is False
+    assert (_ext(record)["levenscyclusStatus"], _ext(record)["statusReden"]) == (
+        "gedeactiveerd",
+        "uitgeschakeld_door_beheerder",
+    )
+    assert (await register.bevestig(agent)).status_code == 409
+    assert register.opgeslagen(agent)["levenscyclusStatus"] == "gedeactiveerd"
+
+    aan = [{"op": "replace", "path": "active", "value": True}]
+    assert (await register.patch(f"/scim/v2/Users/{agent}", "beheerder", aan)).status_code == 200
+    assert register.opgeslagen(agent)["statusReden"] == "heractiveerd_door_beheerder"
+    assert (await register.bevestig(agent)).status_code == 200
+    assert register.opgeslagen(agent)["levenscyclusStatus"] == "actief"
 
 
 async def test_bevestiging_synchroniseert_teams(register: Register) -> None:
