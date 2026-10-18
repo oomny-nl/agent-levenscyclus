@@ -112,16 +112,24 @@ de repo claimt niet meer dan wat hieronder staat.
 
 | Onderdeel | Ondersteund | Niet ondersteund (gedocumenteerd, herkenbaar geweigerd) |
 |---|---|---|
-| Discovery | `GET /ServiceProviderConfig`, `/ResourceTypes` (met `schemaExtensions` voor `User`), `/Schemas` (core `User`, core `Group`, agentextensie met subattribuutmetadata); de laatste twee als `ListResponse` (RFC 7644 §4) | |
+| Discovery | `GET /ServiceProviderConfig`, `/ResourceTypes` en `/ResourceTypes/{id}` (met `schemaExtensions` voor `User`), `/Schemas` en `/Schemas/{uri}` (core `User`, core `Group`, agentextensie met subattribuutmetadata); de lijsten als `ListResponse` (RFC 7644 §4); elke `meta.location` en `$ref` is een absolute URL op de basis-URL van het register (`REGISTER_BASIS`, standaard `REGISTER_URL`) | `filter` op een discovery-endpoint: `403` (RFC 7644 §4) |
 | Attribuutnamen | hoofdletterongevoelig (RFC 7643 §2.1): `Active` in een body of PATCH-`path` is `active`; het register slaat de canonieke schrijfwijze op, vóór validatie en rolscheiding. Een attribuut in twee schrijfwijzen in één object: `400 invalidValue` | |
-| Resources | `POST`, `GET`, `PUT`, `PATCH`, `DELETE` op `/Users` en `/Groups`; servergegenereerde `id` en `meta` (`resourceType`, `created`, `lastModified`, `location`, `version`); `userName` verplicht en uniek (hoofdletterongevoelig); `schemas` met core- en extensie-URI; extensieattributen in de extensiecontainer | `/Me`, `/Bulk`, `.search`, `sortBy`, enterprise-extensie, geneste groepen (een `member` moet een `User` zijn) |
-| Filter | `attr eq "waarde"` op `userName`, `displayName`, `userType`, `externalId`, `id`; combinaties met `and`; `excludedAttributes=members`; `attributes` | `ne`, `co`, `sw`, `pr`, `or`, `not`, groepering, filters op extensieattributen: `400 invalidFilter` |
-| PATCH (RFC 7644 §3.5.2) | `add`, `remove`, `replace`, operatienaam hoofdletterongevoelig; `path` als `attr`, `ext-urn:attr`, `members`, `members[value eq "id"]`; `add`/`replace` zonder `path` met een waardeobject; alle operaties atomair: faalt één, dan verandert niets (`400`) | andere filterexpressies in `path`, `path` met subattribuut na een filter |
-| PUT | Vervangt de resource; `readOnly`- en serverattributen uit de body worden genegeerd, `id` en `meta` blijven | |
-| ListResponse | `totalResults`, `itemsPerPage`, `startIndex`, `Resources` | |
-| Fouten | `urn:ietf:params:scim:api:messages:2.0:Error` met `status`, `scimType` (`invalidFilter`, `invalidValue`, `mutability`, `uniqueness`, `noTarget`, `invalidPath`) en `detail` | |
-| Concurrency | `meta.version` als ETag in de resource en in `ETag` | `If-Match` wordt niet afgedwongen |
+| Attributen | strikt profiel. `User`: `userName` (verplicht, uniek, hoofdletterongevoelig), `displayName`, `userType`, `externalId`, `active` (standaard `true`, daarna altijd bepaald) en bij een agent de extensie; `groups` (readOnly, met absolute `$ref`). `Group`: `displayName` (verplicht, uniek), `externalId`, `members`. `null` is niet toegekend (RFC 7643 §2.5) | elk ander attribuut, ook uit het kernschema (`name`, `emails`): `400 invalidValue` in plaats van stil negeren |
+| Resources | `POST`, `GET`, `PUT`, `PATCH`, `DELETE` op `/Users` en `/Groups`; servergegenereerde `id` en `meta` (`resourceType`, `created`, `lastModified`, `location`, `version`); `schemas` met core- en extensie-URI; extensieattributen in de extensiecontainer; een verwijderde medewerker verdwijnt ook uit elke groep | `/Me` (elke methode), `POST /Bulk` en `POST .../.search`: `501` als SCIM-fout (RFC 7644 §3.11 en §3.12); enterprise-extensie, geneste groepen (een `member` moet een `User` zijn) |
+| Filter | `attr eq "waarde"` (de waarde als JSON-string) op `userName`, `displayName`, `userType`, `externalId`, `id`; combinaties met `and`; `id` en `externalId` exact, de rest hoofdletterongevoelig | `ne`, `co`, `sw`, `pr`, `or`, `not`, groepering, filters op extensieattributen: `400 invalidFilter` |
+| Projectie (RFC 7644 §3.9) | `attributes` of `excludedAttributes` op lijsten, `GET` per resource en de antwoorden van `POST`, `PUT` en `PATCH`; hele attributen, met of zonder kernschema-prefix, en de agentextensie als geheel; `id` en `schemas` komen altijd terug; `ETag` en `Location` blijven staan | beide parameters tegelijk, een subattribuut (`members.value`) of een attribuut uit een ander schema: `400 invalidValue`, vóór er iets wijzigt |
+| PATCH (RFC 7644 §3.5.2) | `add`, `remove`, `replace`, operatienaam hoofdletterongevoelig; `path` als `attr`, `kern-urn:attr`, `ext-urn:attr`, `members`, `members[value eq "id"]` (alleen `remove`); `add`/`replace` zonder `path` met een waardeobject; `remove` van een niet-lid slaagt; een readOnly-attribuut mag alleen ongewijzigd terugkomen; alle operaties atomair: faalt één, dan verandert niets | `remove` zonder `path`: `400 noTarget`; `remove` of `null` op een verplicht attribuut en elke wijziging van een readOnly-attribuut: `400 mutability`; andere filterexpressies en subattribuutpaden in `path`: `400 invalidPath` |
+| PUT | Vervangt de resource; `readOnly`- en serverattributen uit de body worden genegeerd (RFC 7644 §3.3), `id` en `meta` blijven | |
+| ListResponse | `totalResults`, `itemsPerPage`, `startIndex`, `Resources`; `startIndex` kleiner dan 1 telt als 1, een negatieve `count` als 0, hoogstens 200 per pagina (`filter.maxResults`) | `sortBy`, `sortOrder`: `400 invalidValue` (`sort.supported` is `false`) |
+| Fouten | `urn:ietf:params:scim:api:messages:2.0:Error` met `status`, `detail` en bij `400` een `scimType` (`invalidSyntax`, `invalidFilter`, `invalidValue`, `mutability`, `noTarget`, `invalidPath`); `409 uniqueness` bij een bezette naam; ook `401`, `403`, `404`, `405`, `412`, `413` en `501` onder `/scim/v2` als SCIM-fout | |
+| Concurrency (RFC 7644 §3.14) | `meta.version` als zwakke ETag (`W/"3"`) in de resource en in `ETag`; `If-Match` bij `PUT`, `PATCH` en `DELETE` op `/Users` en `/Groups`, met `*` of een lijst, zwak vergeleken (zie de toelichting hieronder); een andere versie: `412`, er verandert niets; zonder `If-Match` geldt last-write-wins | `If-None-Match`: een `GET` geeft altijd `200` met de hele resource, omdat de effectieve status en `groups` afgeleid zijn en kunnen veranderen zonder dat `meta.version` verandert |
 | Media | `application/scim+json` (ook `application/json` geaccepteerd) | |
+
+`If-Match` vergelijkt zwak. RFC 9110 §13.1.1 schrijft voor `If-Match` sterke vergelijking voor,
+waarbij een zwakke ETag nooit overeenkomt; SCIM gebruikt juist zwakke ETags met `If-Match` (RFC
+7644 §3.14). Het register volgt SCIM: `W/"3"` en `"3"` matchen allebei versie 3. Een client die
+`If-Match` meestuurt, krijgt zo optimistische concurrency. De demo stuurt geen `If-Match` mee en
+werkt dus last-write-wins.
 
 #### Agentextensie
 
@@ -163,9 +171,9 @@ en `verlopen`. Een `PATCH active=false` door de beheerder is de noodstop
 De bron (HR/IdP) mag alleen medewerkers (`userType != agent`) en groepen beheren; de beheerder
 alleen agents. De controle gebeurt op de opgeslagen resource én op het resultaat van `POST`, `PUT`
 of `PATCH`: de bron kan een medewerker dus niet via `userType` in een agent veranderen, en de
-beheerder kan een agent niet in een medewerker veranderen (`403`, gelogd). `userType` van een
-bestaand record is onveranderlijk tussen de klassen mens en agent. De agent zelf heeft geen enkel
-SCIM- of beheerrecht: zijn assertie geldt alleen bij de poort.
+beheerder kan een agent niet in een medewerker veranderen (`400 mutability`, gelogd). `userType`
+van een bestaand record is onveranderlijk tussen de klassen mens en agent. De agent zelf heeft geen
+enkel SCIM- of beheerrecht: zijn assertie geldt alleen bij de poort.
 
 Authenticatie op het register: Bearer-tokens per principal (`bron`, `beheerder`, `poort` en per
 eigenaar), bij de eerste start lokaal gegenereerd in een Docker-volume, nooit in git. Een
@@ -228,7 +236,7 @@ overgang verhoogt `meta.version`, zodat een lopende toolcall op de oude versie s
 | Joiner: agent aangemaakt | beheerder, `POST /Users` | `herbeoordeling_vereist` (`wacht_op_eigenaar`), `bevestigingsdeadline = nu + bevestigingstermijn`; geen toegang tot de eigenaar bevestigt. Geweigerd (`400`) als de vervaldatum niet in de toekomst ligt, een termijn ongeldig is, of de eigenaar ontbreekt, inactief is of een agent is |
 | Bevestiging | eigenaar, `POST /beheer/agents/{id}/bevestiging` | `actief`, `laatsteBevestiging = nu`, `bevestigdeVersie = meta.version`; toegangsrelaties gesynchroniseerd (zie 4.3) |
 | Mover: teamlidmaatschap van de eigenaar wijzigt feitelijk | bron, `PATCH`/`PUT`/`DELETE` op `/Groups` | teamrelaties in OpenFGA bijgewerkt (toegang tot oude teamdossiers verdwijnt direct); elke agent van een eigenaar wiens lidmaatschap feitelijk is veranderd: `herbeoordeling_vereist` (`eigenaar_van_team_gewisseld`). Een agent die al op bevestiging wachtte, houdt zijn deadline maar krijgt een nieuwe `meta.version`, zodat een vóór de wissel gelezen versie niet meer bevestigt. Een herhaalde identieke `PATCH` of een `PUT` met dezelfde leden verandert niets en dwingt geen beoordeling af |
-| Leaver: eigenaar `active=false` of verwijderd | bron | agent `gedeactiveerd` (`eigenaar_vertrokken`), `active=false`, toegangsrelaties verwijderd |
+| Leaver: eigenaar `active=false` of verwijderd | bron | agent `gedeactiveerd` (`eigenaar_vertrokken`), `active=false`, toegangsrelaties verwijderd. Bij verwijderen haalt het register de medewerker ook uit elke groep (per groep gelogd als `lid_verwijderd`), zodat geen groep naar een niet-bestaande `User` verwijst |
 | Eigenaar gewijzigd | beheerder, `PATCH` op `eigenaar` | nieuwe eigenaar moet bestaan, actief zijn en een mens zijn (`400`); `agent#eigenaar` naar de nieuwe eigenaar; `herbeoordeling_vereist` (`nieuwe_eigenaar`). Dit is ook de herstelroute na een leaver |
 | Configuratie gewijzigd | beheerder, `PATCH`/`PUT` op `doel`, `toegestaneTools`, `publiekeSleutel`, `vervaldatum`, `herbeoordelingTermijn` of `bevestigingstermijn` | als de agent `actief` was: `herbeoordeling_vereist` (`configuratie_gewijzigd`), toegangsrelaties verwijderd; de eigenaar bevestigt de nieuwe configuratie. Een nieuwe `vervaldatum` op een `verlopen` agent: `herbeoordeling_vereist` (`vervaldatum_verlengd`) |
 | Periodieke herbeoordeling | tijdregel 3 | `herbeoordeling_vereist` (`periodieke_herbeoordeling`) |
@@ -432,10 +440,14 @@ Elke `tools/call` doorloopt, in deze volgorde, en de eerste weigering bepaalt de
    `audit_niet_vastgelegd` en gebeurt er niets. Bij een record `toegestaan` controleert het
    register deze schrijfactie **onder het mutatieslot**: de agent bestaat nog, `meta.version` is
    gelijk aan `recordversie` en de effectieve status is op dat moment `actief`. Anders legt het
-   register het record vast als `geweigerd` met reden `toestand_gewijzigd` en antwoordt `409`; de
-   poort weigert de toolcall. Dit is het definitieve toelatingsmoment.
+   register het record vast als `geweigerd` met reden `toestand_gewijzigd`, de concrete oorzaak
+   (bijvoorbeeld `recordversie verouderd`) in `toelichting` en `controles.logboek` op `geweigerd`,
+   en antwoordt `409`; de poort weigert de toolcall. Dit is het definitieve toelatingsmoment.
 
-Overgeslagen stappen staan in het record als `niet_uitgevoerd`. Een record `toegestaan` bewijst de
+Overgeslagen stappen staan in het record als `niet_uitgevoerd`. De stap `logboek` staat in elk
+vastgelegd `tools/call`-record op `ok`, ook als een eerdere stap weigerde: het vastleggen van het
+besluit is die stap. Het register controleert elk toolcall-record tegen dit schema (bekende velden,
+een uitkomst per stap, `toegestaan` alleen met `ok` bij alle vijf) en zet de tijd zelf. Een record `toegestaan` bewijst de
 toelating op dat moment, niet dat de tool is voltooid; neveneffecten (welke notities bestaan, welke
 dossierinhoud is teruggegeven) worden in demo en tests afzonderlijk gecontroleerd.
 
@@ -479,7 +491,7 @@ van de tabel opvalt. Dit is het ontwerp uit agent-mandaat, hier met drie soorten
 |---|---|---|
 | `levenscyclus` | register | `gebeurtenis` (aangemaakt, bevestigd, herbeoordeling_vereist, gedeactiveerd, verlopen, gewijzigd, verwijderd, noodstop, heractiveerd, tuples_niet_gesynchroniseerd), `agent`, `agent_naam`, `eigenaar`, `eigenaar_naam`, `actor` (bron, beheerder, eigenaar, controle), `reden` |
 | `scim` | register | `actor`, `operatie`, `resource`, `uitkomst` (ook geweigerde pogingen, zoals de bron die een agent aanmaakt) |
-| `toolcall` | poort via `POST /logboek` | `agent`, `agent_naam`, `eigenaar_naam`, `tool`, `dossier`, `beslissing`, `reden` (bij weigering, waaronder `toestand_gewijzigd` als het register de toelating onder het slot afwijst), `controles` (uitkomst per stap of `niet_uitgevoerd`), `recordversie`, `jti` |
+| `toolcall` | poort via `POST /logboek` | `agent`, `agent_naam`, `eigenaar_naam`, `tool`, `dossier`, `beslissing`, `reden` (bij weigering, waaronder `toestand_gewijzigd` als het register de toelating onder het slot afwijst), `toelichting` (de concrete oorzaak bij `toestand_gewijzigd`), `controles` (uitkomst per stap of `niet_uitgevoerd`), `recordversie`, `jti` |
 
 Append en ankerwrite zijn geserialiseerd achter het mutatieslot van het register. De aanroeper
 (een SCIM-mutatie, een bevestiging, de poort met `POST /logboek`) krijgt pas succes als de commit

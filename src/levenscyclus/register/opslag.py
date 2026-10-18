@@ -243,7 +243,11 @@ class Opslag:
 
         Raises:
             LogboekFout: In de blokkeerstand, of als de ankerwrite mislukt (zet de blokkeerstand).
+            ValueError: Als het record een veld bevat dat het logboek zelf zet.
         """
+        gereserveerd = sorted({"tijd", "nr", "vorige", "hash"} & set(record))
+        if gereserveerd:
+            raise ValueError(f"het logboek zet {gereserveerd} zelf; laat ze weg uit het record")
         if self.geblokkeerd:
             raise LogboekFout(f"logboek geblokkeerd: {self.geblokkeerd}")
         if not self._in_transactie:

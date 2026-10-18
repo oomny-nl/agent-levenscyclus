@@ -102,7 +102,7 @@ verantwoordelijk zijn; zij beschermt niet tegen een overgenomen regiecontainer.
 | Bron of beheerder schrijft `Active` (andere schrijfwijze) om offboarding of noodstop te ontwijken | zelfde gevolg als `active`; beide schrijfwijzen in één object `400` | `test_leaver_met_hoofdlettervariant` (u), `test_noodstop_met_hoofdlettervariant_zonder_pad` (u), `test_attribuut_in_twee_schrijfwijzen_geweigerd` (u) |
 | Beheerder wijzigt een effectief verlopen agent of schrijft een gelezen record terug | geen onbedoelde noodstop: alleen een expliciete `active`-opdracht schakelt | `test_wijziging_van_verlopen_agent_is_geen_noodstop` (u), `test_put_die_gelezen_record_terugschrijft_schakelt_niet` (u) |
 | Oud eigenaarstoken na verwijderen en opnieuw aanmaken van dezelfde `userName` | `401` (token gebonden aan SCIM-id) | `test_eigenaarstoken_gebonden_aan_id` (i) |
-| Bron verandert `userType` van een medewerker in `agent` (of beheerder omgekeerd) | `403`, gelogd | `test_rolwissel_via_usertype_geweigerd` (i) |
+| Bron verandert `userType` van een medewerker in `agent` (of beheerder omgekeerd) | `400` (`mutability`), gelogd | `test_rolwissel_via_usertype_geweigerd` (i) |
 | Mover laat door een fout een oud teamtuple staan; eigenaar bevestigt opnieuw | bevestiging synchroniseert eerst de teams van de eigenaar; oud tuple verdwijnt | `test_bevestiging_synchroniseert_teams` (u) |
 | Noodstop gevolgd door mover, eigenaarswissel of nieuwe vervaldatum | blijft `gedeactiveerd` (`uitgeschakeld_door_beheerder`) | `test_noodstop_dominant` (u) |
 | Herbouw na storeverlies faalt halverwege | het volgende herstel herbouwt alsnog, ook bij dezelfde store-id's | `test_halve_herbouw_wordt_hervat` (u) |

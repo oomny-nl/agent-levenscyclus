@@ -6,10 +6,13 @@ import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from levenscyclus.klok import parse_tijd
 from levenscyclus.logboek import controleer_tegen_anker, ketenhash, lees_anker
+from levenscyclus.register.app import STAPPEN
 from levenscyclus.register.opslag import LogboekFout, Opslag
 from tests.unit.conftest import Register
 
@@ -193,3 +196,93 @@ async def test_na_een_mislukte_commit_gaat_het_volgende_verzoek_duurzaam(
     assert [r["resource"] for r in records if r["soort"] == "scim"] == ["User lukt"]
     anker = lees_anker(register.dienst.inst.anker_pad)
     assert (anker or [])[-1] == (records[-1]["nr"], records[-1]["hash"])
+
+
+@pytest.mark.parametrize("veld", ["tijd", "nr", "vorige", "hash"])
+def test_log_weigert_velden_die_het_logboek_zelf_zet(tmp_path: Path, veld: str) -> None:
+    opslag = _opslag(tmp_path)
+    with pytest.raises(ValueError, match=veld):
+        opslag.log({"soort": "levenscyclus", veld: "van de client"}, NU)
+    assert opslag.logboek() == []
+
+
+def _toolcall(agent_id: str | None, /, **afwijking: Any) -> dict[str, Any]:
+    return {
+        "soort": "toolcall",
+        "agent": agent_id,
+        "agent_naam": "agent-x",
+        "eigenaar_naam": None,
+        "tool": "dossier_lezen",
+        "dossier": "2026-0142",
+        "beslissing": "geweigerd",
+        "reden": "tool_niet_toegestaan",
+        "toelichting": None,
+        "controles": {
+            "assertie": "ok",
+            "levenscyclus": "ok",
+            "tool": "geweigerd",
+            "relatie": "niet_uitgevoerd",
+            "logboek": "ok",
+        },
+        "recordversie": None,
+        "jti": None,
+        **afwijking,
+    }
+
+
+def _toolrecords(register: Register) -> list[dict[str, Any]]:
+    return [r for r in register.dienst.opslag.logboek() if r["soort"] == "toolcall"]
+
+
+@pytest.mark.parametrize(
+    "afwijking",
+    [
+        {"tijd": "2000-01-01T00:00:00Z"},
+        {"nr": 1},
+        {"hash": "0" * 64},
+        {"extra": "x"},
+        {"soort": "scim"},
+        {"tool": None},
+        {"agent": 5},
+        {"beslissing": "misschien"},
+        {"controles": {"assertie": "ok"}},
+        {"controles": dict.fromkeys(("assertie", "levenscyclus", "tool", "relatie"), "ok")},
+        {"controles": dict.fromkeys(STAPPEN, "prima")},
+        {"beslissing": "toegestaan"},
+    ],
+)
+async def test_toolcall_record_buiten_schema_geweigerd(
+    register: Register, afwijking: dict[str, Any]
+) -> None:
+    antwoord = await register.verzoek("POST", "/logboek", "poort", _toolcall(None, **afwijking))
+    assert antwoord.status_code == 400, antwoord.text
+    assert _toolrecords(register) == []
+
+
+async def test_toolcall_tijd_komt_van_het_register(register: Register) -> None:
+    antwoord = await register.verzoek("POST", "/logboek", "poort", _toolcall(None))
+    assert antwoord.status_code == 201, antwoord.text
+    [record] = _toolrecords(register)
+    assert record["tijd"] == antwoord.json()["tijd"]
+    assert parse_tijd(record["tijd"]) <= register.dienst.klok.nu()
+
+
+async def test_afgewezen_toelating_legt_logboekstap_geweigerd_vast(register: Register) -> None:
+    agent = await register.agent(await register.mens("kees"))
+    body = _toolcall(
+        agent,
+        beslissing="toegestaan",
+        reden=None,
+        controles=dict.fromkeys(STAPPEN, "ok"),
+        recordversie='W/"0"',
+    )
+    antwoord = await register.verzoek("POST", "/logboek", "poort", body)
+    assert antwoord.status_code == 409, antwoord.text
+    [record] = _toolrecords(register)
+    assert record == antwoord.json()
+    assert (record["beslissing"], record["reden"], record["toelichting"]) == (
+        "geweigerd",
+        "toestand_gewijzigd",
+        "recordversie verouderd",
+    )
+    assert record["controles"] == {**dict.fromkeys(STAPPEN, "ok"), "logboek": "geweigerd"}

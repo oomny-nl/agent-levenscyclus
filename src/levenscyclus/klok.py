@@ -8,17 +8,23 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from levenscyclus.duur import MAX_DUUR
+
 
 def parse_tijd(tekst: str) -> datetime:
     """Zet een SCIM/ISO 8601-dateTime om in een tijdzonebewuste `datetime` (UTC).
 
     Raises:
-        ValueError: Bij een onleesbare of tijdzoneloze waarde.
+        ValueError: Bij een onleesbare of tijdzoneloze waarde, of een tijdstip dat in UTC buiten
+            het bereik van `datetime` valt.
     """
     waarde = datetime.fromisoformat(tekst.replace("Z", "+00:00"))
     if waarde.tzinfo is None:
         raise ValueError(f"tijdstip {tekst!r} heeft geen tijdzone; gebruik bijvoorbeeld ...Z")
-    return waarde.astimezone(UTC)
+    try:
+        return waarde.astimezone(UTC)
+    except OverflowError as fout:
+        raise ValueError(f"tijdstip {tekst!r} valt in UTC buiten het datumbereik") from fout
 
 
 def iso(tijd: datetime) -> str:
@@ -64,11 +70,13 @@ class Klok:
 
         Raises:
             PermissionError: Buiten de demostand.
-            ValueError: Bij een duur van nul of negatief.
+            ValueError: Bij een duur van nul of negatief, of een totale offset boven 100 jaar.
         """
         if not self.demostand:
             raise PermissionError("de registerklok kan alleen met DEMO_KLOK=1 worden verzet")
         if duur <= timedelta(0):
             raise ValueError("de klok gaat alleen vooruit")
+        if self._offset + duur > MAX_DUUR:
+            raise ValueError(f"de demoklok staat maximaal {MAX_DUUR.days} dagen vooruit")
         self._offset += duur
         return self.nu()

@@ -550,15 +550,15 @@ class Motor:
         """Definitieve toelating onder het mutatieslot (ONTWERP §4.4 stap 5).
 
         Returns:
-            None als de toelating standhoudt, anders de reden (`toestand_gewijzigd`).
+            None als de toelating standhoudt, anders de toelichting bij `toestand_gewijzigd`.
         """
         agent = self.opslag.haal("User", str(record.get("agent", "")))
         if agent is None or not is_agent(agent):
-            return "toestand_gewijzigd: agent bestaat niet meer"
+            return "agent bestaat niet meer"
         if agent["meta"]["version"] != record.get("recordversie"):
-            return "toestand_gewijzigd: recordversie verouderd"
+            return "recordversie verouderd"
         if ext(self.effectief(agent))["levenscyclusStatus"] != ACTIEF:
-            return "toestand_gewijzigd: agent is niet meer actief"
+            return "agent is niet meer actief"
         return None
 
     async def relatiecheck(self, agent: dict[str, Any], relatie: str, dossier: str) -> bool:

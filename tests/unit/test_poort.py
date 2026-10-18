@@ -20,7 +20,8 @@ from levenscyclus.assertie import Sleutelpaar
 from levenscyclus.poort.app import maak_app
 from levenscyclus.poort.opslag import PoortOpslag
 from levenscyclus.poort.register import Register
-from levenscyclus.poort.toegang import Toegang
+from levenscyclus.poort.toegang import STAPPEN, Toegang, _record
+from levenscyclus.register import app as register_app
 from levenscyclus.register.scim import URN_AGENT
 from tests.unit.conftest import NepFga, instellingen
 
@@ -82,8 +83,15 @@ class NepRegister:
         if self.logboek == "503":
             return httpx2.Response(503, json={"detail": "ankerwrite mislukt"})
         if self.logboek == "409":
-            reden = "toestand_gewijzigd: recordversie verouderd"
-            return httpx2.Response(409, json={**record, "beslissing": "geweigerd", "reden": reden})
+            controles = {**record["controles"], "logboek": "geweigerd"}
+            afgewezen = {
+                **record,
+                "beslissing": "geweigerd",
+                "reden": "toestand_gewijzigd",
+                "toelichting": "recordversie verouderd",
+                "controles": controles,
+            }
+            return httpx2.Response(409, json=afgewezen)
         return httpx2.Response(201, json={"nr": len(self.gelogd), **record})
 
 
@@ -175,7 +183,31 @@ def test_toestand_gewijzigd_voert_tool_niet_uit(proef: Proef) -> None:
     antwoord = proef.notitie()
     assert antwoord.status_code == 403
     assert 'error="toestand_gewijzigd"' in _code(antwoord)
+    assert "recordversie verouderd" in _code(antwoord)
     assert proef.opslag.notities(DOSSIER) == []
+
+
+def test_geweigerde_toolcall_staat_vastgelegd_met_logboek_ok(proef: Proef) -> None:
+    # Stap 5 legt ook een eerdere weigering vast; het record zegt dus niet `niet_uitgevoerd`.
+    proef.fga.toegestaan = False
+    assert proef.notitie().status_code == 403
+    [record] = proef.register.gelogd
+    assert record["controles"] == {
+        "assertie": "ok",
+        "levenscyclus": "ok",
+        "tool": "geweigerd",
+        "relatie": "niet_uitgevoerd",
+        "logboek": "ok",
+    }
+
+
+def test_toolcall_record_volgt_het_registerschema() -> None:
+    controles = {**dict.fromkeys(STAPPEN, "ok"), "logboek": "niet_uitgevoerd"}
+    record = _record(None, "dossier_lezen", None, controles, None)
+    assert record["controles"]["logboek"] == "ok"
+    assert set(record) == set(register_app.TOOLCALL_VELDEN)
+    assert STAPPEN == register_app.STAPPEN
+    assert register_app._valideer_toolcall(record) == record
 
 
 def test_jti_overleeft_herstart(tmp_path: Path) -> None:

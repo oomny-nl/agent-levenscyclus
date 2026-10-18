@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -20,7 +21,9 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from levenscyclus.config import Instellingen
 from levenscyclus.duur import parse_duur
@@ -36,6 +39,24 @@ LEZERS = ("bron", "beheerder", "poort")
 MUTATOREN = ("bron", "beheerder")
 RELATIES = ("lezen", "notitie_schrijven", "besluit_nemen")
 MAX_BODY = 256 * 1024
+# Altijd teruggegeven, ook bij `attributes` (RFC 7643 §3.1, `returned: always`).
+ALTIJD = ("id", "schemas")
+_ETAGS = re.compile(r'\*|(?:W/)?"[^"]*"')
+# Het toolcall-record van de poort (ONTWERP §4.4 en §4.5); gelijk aan `poort.toegang._record`.
+STAPPEN = ("assertie", "levenscyclus", "tool", "relatie", "logboek")
+UITKOMSTEN = ("ok", "geweigerd", "niet_uitgevoerd")
+TOOLCALL_TEKST = (
+    "agent",
+    "agent_naam",
+    "eigenaar_naam",
+    "tool",
+    "dossier",
+    "reden",
+    "toelichting",
+    "recordversie",
+    "jti",
+)
+TOOLCALL_VELDEN = ("soort", "beslissing", "controles", *TOOLCALL_TEKST)
 
 
 @dataclass(frozen=True)
@@ -174,12 +195,86 @@ async def _json(request: Request) -> dict[str, Any]:
     return gegevens
 
 
-def _antwoord(resource: dict[str, Any], status: int = 200) -> Response:
+@dataclass(frozen=True)
+class Projectie:
+    """`attributes` of `excludedAttributes` (RFC 7644 §3.9), hoofdletterongevoelig.
+
+    Profielgrens: alleen hele attributen, met of zonder kernschema-prefix, en de agentextensie als
+    geheel. Een subattribuut of ander schema geeft `400 invalidValue` in plaats van een stil
+    onvolledige selectie.
+    """
+
+    houd: frozenset[str] = frozenset()
+    weg: frozenset[str] = frozenset()
+
+    @classmethod
+    def uit(cls, request: Request) -> Projectie:
+        """Lees en controleer de parameters; vóór elke mutatie, zodat een fout niets wijzigt."""
+        params = request.query_params
+        if "attributes" in params and "excludedAttributes" in params:
+            raise ScimFout(
+                400, "attributes en excludedAttributes sluiten elkaar uit", "invalidValue"
+            )
+        return cls(
+            _selectie(params.get("attributes", "")),
+            _selectie(params.get("excludedAttributes", "")),
+        )
+
+    def pas_toe(self, resource: dict[str, Any]) -> dict[str, Any]:
+        """De resource met alleen de gevraagde attributen."""
+
+        def zichtbaar(naam: str) -> bool:
+            sleutel = naam.lower()
+            if sleutel in ALTIJD:
+                return True
+            return sleutel in self.houd if self.houd else sleutel not in self.weg
+
+        return {k: v for k, v in resource.items() if zichtbaar(k)}
+
+
+def _selectie(tekst: str) -> frozenset[str]:
+    namen = set()
+    for ruw in (deel.strip() for deel in tekst.split(",")):
+        naam = scim.zonder_kernprefix(ruw)
+        if not naam:
+            continue
+        if naam.lower() != scim.URN_AGENT.lower() and (
+            "." in naam or "[" in naam or naam.lower().startswith("urn:")
+        ):
+            raise ScimFout(
+                400, f"{ruw!r} valt buiten het profiel: alleen hele attributen", "invalidValue"
+            )
+        namen.add(naam.lower())
+    return frozenset(namen)
+
+
+def _antwoord(
+    resource: dict[str, Any], projectie: Projectie | None = None, status: int = 200
+) -> Response:
+    """SCIM-antwoord; `ETag` en `Location` komen uit de volledige resource, vóór de projectie."""
     koppen = {}
     if "meta" in resource:
         koppen["ETag"] = resource["meta"]["version"]
         koppen["Location"] = resource["meta"]["location"]
-    return JSONResponse(resource, status_code=status, media_type=scim.MEDIA, headers=koppen)
+    inhoud = projectie.pas_toe(resource) if projectie else resource
+    return JSONResponse(inhoud, status_code=status, media_type=scim.MEDIA, headers=koppen)
+
+
+def _eis_versie(request: Request, huidig: dict[str, Any]) -> None:
+    """`If-Match` bij PUT, PATCH en DELETE (RFC 7644 §3.14); `412` bij een andere versie.
+
+    Zwakke vergelijking: SCIM gebruikt zwakke ETags (`W/"3"`) juist met `If-Match` (RFC 7644
+    §3.14), terwijl RFC 9110 §13.1.1 voor `If-Match` sterke vergelijking voorschrijft en een zwakke
+    ETag dan nooit zou overeenkomen. Zonder header geldt last-write-wins.
+    """
+    koppen = request.headers.getlist("if-match")
+    if not koppen:
+        return
+    tags = _ETAGS.findall(", ".join(koppen))
+    versie = str(huidig["meta"]["version"])
+    if "*" in tags or versie.removeprefix("W/") in {t.removeprefix("W/") for t in tags}:
+        return
+    raise ScimFout(412, f"If-Match komt niet overeen met de huidige versie {versie}")
 
 
 def _log_scim(
@@ -209,7 +304,7 @@ def _controleer_rol(
     doel = f"User {nieuw.get('userName', oud['userName'] if oud else '?')}"
     if oud is not None and is_agent(oud) != is_agent(nieuw):
         _log_scim(dienst, principal, operatie, doel, "geweigerd_rolwissel")
-        raise ScimFout(403, "userType kan niet wisselen tussen mens en agent", "mutability")
+        raise ScimFout(400, "userType kan niet wisselen tussen mens en agent", "mutability")
     verwacht = {"bron": "mens", "beheerder": "agent"}.get(principal.soort)
     if verwacht != klasse:
         _log_scim(dienst, principal, operatie, doel, "geweigerd_rolscheiding")
@@ -228,23 +323,29 @@ def _verrijk(dienst: Dienst, resource: dict[str, Any]) -> dict[str, Any]:
     return resource
 
 
-def _projecteer(resource: dict[str, Any], request: Request) -> dict[str, Any]:
-    """`attributes` en `excludedAttributes` (alleen topniveau)."""
-    params = request.query_params
-    weg = {a.strip() for a in params.get("excludedAttributes", "").split(",") if a.strip()}
-    houd = {a.strip() for a in params.get("attributes", "").split(",") if a.strip()}
-    vast = {"schemas", "id", "meta"}
-    return {
-        k: v for k, v in resource.items() if k not in weg and (not houd or k in houd or k in vast)
-    }
+def _geheel(request: Request, naam: str, standaard: int) -> int:
+    waarde = request.query_params.get(naam)
+    if waarde is None:
+        return standaard
+    try:
+        return int(waarde)
+    except ValueError as fout:
+        raise ScimFout(400, f"{naam} moet een geheel getal zijn", "invalidValue") from fout
 
 
 def _lijst(items: list[dict[str, Any]], request: Request) -> Response:
+    """Lijst met filter en paginering (RFC 7644 §3.4.2); sorteren valt buiten het profiel."""
     params = request.query_params
+    if "sortBy" in params or "sortOrder" in params:
+        raise ScimFout(
+            400, "sorteren wordt niet ondersteund (sort.supported is false)", "invalidValue"
+        )
+    projectie = Projectie.uit(request)
     paren = scim.parse_filter(params["filter"]) if "filter" in params else []
     gevonden = [r for r in items if scim.voldoet(r, paren)]
-    start = max(int(params.get("startIndex", 1)), 1)
-    aantal = max(min(int(params.get("count", 100)), 200), 0)
+    # Kleiner dan 1 telt als 1, negatief als 0 (RFC 7644 §3.4.2.4); maximaal maxResults.
+    start = max(_geheel(request, "startIndex", 1), 1)
+    aantal = min(max(_geheel(request, "count", 100), 0), 200)
     pagina = gevonden[start - 1 : start - 1 + aantal]
     return JSONResponse(
         {
@@ -252,7 +353,7 @@ def _lijst(items: list[dict[str, Any]], request: Request) -> Response:
             "totalResults": len(gevonden),
             "itemsPerPage": len(pagina),
             "startIndex": start,
-            "Resources": [_projecteer(r, request) for r in pagina],
+            "Resources": [projectie.pas_toe(r) for r in pagina],
         },
         media_type=scim.MEDIA,
     )
@@ -323,6 +424,7 @@ async def _verwijder_user(dienst: Dienst, principal: Principal, oud: dict[str, A
             getroffen: list[dict[str, Any]] = []
         else:
             getroffen = dienst.m.blokkeer_na_gebruikerswijziging(oud, None)
+            getroffen += _verwijder_lidmaatschappen(dienst, principal, oud["id"])
             dienst.opslag.trek_token_in(oud["id"])
         dienst.opslag.verwijder("User", oud["id"])
         _log_scim(dienst, principal, "DELETE", f"User {oud['userName']}", "ok")
@@ -330,6 +432,25 @@ async def _verwijder_user(dienst: Dienst, principal: Principal, oud: dict[str, A
         await dienst.m.sync_na_verwijdering(oud)
     else:
         await dienst.m.sync_na_gebruikerswijziging(oud["id"], getroffen)
+
+
+def _verwijder_lidmaatschappen(
+    dienst: Dienst, principal: Principal, gebruiker_id: str
+) -> list[dict[str, Any]]:
+    """Haal een verwijderde medewerker uit elke groep, in de transactie van de verwijdering.
+
+    Zonder deze stap blijft een member naar een niet-bestaande User staan en weigert elke latere
+    `PUT` of `PATCH` op die groep (`member ... is geen bestaande medewerker`).
+    """
+    getroffen: list[dict[str, Any]] = []
+    for groep in dienst.opslag.alle("Group"):
+        if gebruiker_id not in scim.leden_van(groep):
+            continue
+        nieuw = dict(groep, members=[m for m in groep["members"] if m["value"] != gebruiker_id])
+        opgeslagen = dienst.opslag.vervang("Group", groep["id"], nieuw, iso(dienst.klok.nu()))
+        getroffen += dienst.m.blokkeer_na_groepswijziging(groep, opgeslagen)[1]
+        _log_scim(dienst, principal, "DELETE", f"Group {groep['displayName']}", "lid_verwijderd")
+    return getroffen
 
 
 def _schakelaar_uit_put(dienst: Dienst, oud: dict[str, Any], body: dict[str, Any]) -> bool | None:
@@ -357,43 +478,48 @@ def _users(app: FastAPI, dienst: Dienst) -> None:
     @app.get(basis + "/{id_}")
     async def een(id_: str, request: Request) -> Response:
         _principal(dienst, request, *LEZERS)
-        return _antwoord(_projecteer(_verrijk(dienst, _haal(dienst, "User", id_)), request))
+        projectie = Projectie.uit(request)
+        return _antwoord(_verrijk(dienst, _haal(dienst, "User", id_)), projectie)
 
     @app.post(basis)
     async def maak(request: Request) -> Response:
         principal = _principal(dienst, request, *MUTATOREN)
-        body = await _json(request)
+        projectie, body = Projectie.uit(request), await _json(request)
         async with dienst.lock:
             opgeslagen = await _schrijf_user(dienst, Mutatie(principal, "POST"), None, body)
-        return _antwoord(_verrijk(dienst, opgeslagen), 201)
+        return _antwoord(_verrijk(dienst, opgeslagen), projectie, 201)
 
     @app.put(basis + "/{id_}")
     async def vervang(id_: str, request: Request) -> Response:
         principal = _principal(dienst, request, *MUTATOREN)
-        body = await _json(request)
+        projectie, body = Projectie.uit(request), await _json(request)
         async with dienst.lock:
             oud = _haal(dienst, "User", id_)
+            _eis_versie(request, oud)
             mutatie = Mutatie(principal, "PUT", _schakelaar_uit_put(dienst, oud, body))
             opgeslagen = await _schrijf_user(dienst, mutatie, oud, body)
-        return _antwoord(_verrijk(dienst, opgeslagen))
+        return _antwoord(_verrijk(dienst, opgeslagen), projectie)
 
     @app.patch(basis + "/{id_}")
     async def wijzig(id_: str, request: Request) -> Response:
         principal = _principal(dienst, request, *MUTATOREN)
-        body = await _json(request)
+        projectie, body = Projectie.uit(request), await _json(request)
         async with dienst.lock:
             oud = _haal(dienst, "User", id_)
-            huidig = _verrijk(dienst, oud) if is_agent(oud) else dict(oud)
-            nieuw = scim.pas_patch_toe(huidig, body)
+            _eis_versie(request, oud)
+            # De gelezen vorm (effectieve status, groups): readOnly-waarden mogen ongewijzigd terug.
+            nieuw = scim.pas_patch_toe(_verrijk(dienst, dict(oud)), body, "User")
             mutatie = Mutatie(principal, "PATCH", scim.schakelaar_uit_patch(body))
             opgeslagen = await _schrijf_user(dienst, mutatie, oud, nieuw)
-        return _antwoord(_verrijk(dienst, opgeslagen))
+        return _antwoord(_verrijk(dienst, opgeslagen), projectie)
 
     @app.delete(basis + "/{id_}")
     async def verwijder(id_: str, request: Request) -> Response:
         principal = _principal(dienst, request, *MUTATOREN)
         async with dienst.lock:
-            await _verwijder_user(dienst, principal, _haal(dienst, "User", id_))
+            oud = _haal(dienst, "User", id_)
+            _eis_versie(request, oud)
+            await _verwijder_user(dienst, principal, oud)
         return Response(status_code=204)
 
 
@@ -435,37 +561,43 @@ def _groups(app: FastAPI, dienst: Dienst) -> None:
     @app.get(basis + "/{id_}")
     async def een(id_: str, request: Request) -> Response:
         _principal(dienst, request, *LEZERS)
-        return _antwoord(_projecteer(_haal(dienst, "Group", id_), request))
+        return _antwoord(_haal(dienst, "Group", id_), Projectie.uit(request))
 
     @app.post(basis)
     async def maak(request: Request) -> Response:
         principal = _principal(dienst, request, "bron")
-        body = await _json(request)
+        projectie, body = Projectie.uit(request), await _json(request)
         async with dienst.lock:
-            return _antwoord(await _schrijf_group(dienst, principal, None, body, "POST"), 201)
+            opgeslagen = await _schrijf_group(dienst, principal, None, body, "POST")
+        return _antwoord(opgeslagen, projectie, 201)
 
     @app.put(basis + "/{id_}")
     async def vervang(id_: str, request: Request) -> Response:
         principal = _principal(dienst, request, "bron")
-        body = await _json(request)
+        projectie, body = Projectie.uit(request), await _json(request)
         async with dienst.lock:
             oud = _haal(dienst, "Group", id_)
-            return _antwoord(await _schrijf_group(dienst, principal, oud, body, "PUT"))
+            _eis_versie(request, oud)
+            opgeslagen = await _schrijf_group(dienst, principal, oud, body, "PUT")
+        return _antwoord(opgeslagen, projectie)
 
     @app.patch(basis + "/{id_}")
     async def wijzig(id_: str, request: Request) -> Response:
         principal = _principal(dienst, request, "bron")
-        body = await _json(request)
+        projectie, body = Projectie.uit(request), await _json(request)
         async with dienst.lock:
             oud = _haal(dienst, "Group", id_)
-            nieuw = scim.pas_patch_toe(dict(oud), body)
-            return _antwoord(await _schrijf_group(dienst, principal, oud, nieuw, "PATCH"))
+            _eis_versie(request, oud)
+            nieuw = scim.pas_patch_toe(oud, body, "Group")
+            opgeslagen = await _schrijf_group(dienst, principal, oud, nieuw, "PATCH")
+        return _antwoord(opgeslagen, projectie)
 
     @app.delete(basis + "/{id_}")
     async def verwijder(id_: str, request: Request) -> Response:
         principal = _principal(dienst, request, "bron")
         async with dienst.lock:
             oud = _haal(dienst, "Group", id_)
+            _eis_versie(request, oud)
             with dienst.opslag.transactie():
                 dienst.opslag.verwijder("Group", id_)
                 eigenaren, getroffen = dienst.m.blokkeer_na_groepswijziging(oud, None)
@@ -477,19 +609,59 @@ def _groups(app: FastAPI, dienst: Dienst) -> None:
 # Discovery ---------------------------------------------------------------------------------------
 
 
-def _discovery(app: FastAPI) -> None:
+def _discovery_antwoord(request: Request, inhoud: dict[str, Any]) -> Response:
+    """Discovery negeert queryparameters, maar een filter krijgt `403` (RFC 7644 §4)."""
+    if "filter" in request.query_params:
+        raise ScimFout(403, "filteren op discovery-endpoints wordt niet ondersteund")
+    return JSONResponse(inhoud, media_type=scim.MEDIA)
+
+
+def _een_uit(resources: list[dict[str, Any]], id_: str, soort: str) -> dict[str, Any]:
+    for resource in resources:
+        if str(resource["id"]).lower() == id_.lower():
+            return resource
+    raise ScimFout(404, f"{soort} {id_} bestaat niet")
+
+
+def _discovery(app: FastAPI, dienst: Dienst) -> None:
+    def basis() -> str:
+        return dienst.opslag.basis_url
+
+    def schemas() -> list[dict[str, Any]]:
+        return [*scim.kernschemas(basis()), scim.agentschema(basis())]
+
     @app.get("/scim/v2/ServiceProviderConfig")
-    async def spc() -> Response:
-        return JSONResponse(scim.service_provider_config(), media_type=scim.MEDIA)
+    async def spc(request: Request) -> Response:
+        return _discovery_antwoord(request, scim.service_provider_config(basis()))
 
     @app.get("/scim/v2/ResourceTypes")
-    async def resource_types() -> Response:
-        return JSONResponse(scim.lijstantwoord(scim.resource_types()), media_type=scim.MEDIA)
+    async def resource_types(request: Request) -> Response:
+        return _discovery_antwoord(request, scim.lijstantwoord(scim.resource_types(basis())))
+
+    @app.get("/scim/v2/ResourceTypes/{id_}")
+    async def resource_type(id_: str, request: Request) -> Response:
+        gevonden = _een_uit(scim.resource_types(basis()), id_, "ResourceType")
+        return _discovery_antwoord(request, gevonden)
 
     @app.get("/scim/v2/Schemas")
-    async def schemas() -> Response:
-        schemas = [*scim.kernschemas(), scim.agentschema()]
-        return JSONResponse(scim.lijstantwoord(schemas), media_type=scim.MEDIA)
+    async def alle_schemas(request: Request) -> Response:
+        return _discovery_antwoord(request, scim.lijstantwoord(schemas()))
+
+    @app.get("/scim/v2/Schemas/{id_}")
+    async def schema(id_: str, request: Request) -> Response:
+        return _discovery_antwoord(request, _een_uit(schemas(), id_, "Schema"))
+
+
+def _niet_ondersteund(app: FastAPI) -> None:
+    """Buiten het profiel: `501` in SCIM-formaat (RFC 7644 §3.11 en §3.12, tabel 8)."""
+    methoden = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+
+    async def niet_ondersteund(request: Request) -> Response:
+        raise ScimFout(501, f"{request.url.path} wordt niet ondersteund in dit profiel")
+
+    app.add_api_route("/scim/v2/Me", niet_ondersteund, methods=methoden)
+    for pad in ("Bulk", ".search", "Users/.search", "Groups/.search"):
+        app.add_api_route(f"/scim/v2/{pad}", niet_ondersteund, methods=["POST"])
 
 
 # Beheer ------------------------------------------------------------------------------------------
@@ -610,12 +782,11 @@ def _demoklok(app: FastAPI, dienst: Dienst) -> None:
     async def klok(request: Request) -> Response:
         _principal(dienst, request, "beheerder")
         body = await _json(request)
-        try:
-            duur = parse_duur(str(body.get("vooruit", "")))
-        except ValueError as fout:
-            raise ScimFout(400, str(fout), "invalidValue") from fout
         async with dienst.lock:
-            nu = dienst.klok.zet_vooruit(duur)
+            try:
+                nu = dienst.klok.zet_vooruit(parse_duur(str(body.get("vooruit", ""))))
+            except ValueError as fout:
+                raise ScimFout(400, str(fout), "invalidValue") from fout
             dienst.opslag.log(
                 {
                     "soort": "levenscyclus",
@@ -633,18 +804,57 @@ def _demoklok(app: FastAPI, dienst: Dienst) -> None:
 # Logboek en OpenFGA ------------------------------------------------------------------------------
 
 
+def _valideer_toolcall(body: dict[str, Any]) -> dict[str, Any]:
+    """Het toolcall-record van de poort: alleen bekende velden, met het juiste type.
+
+    Raises:
+        ScimFout: `400 invalidValue` bij een ander soort record, een onbekend of gereserveerd veld
+            (`tijd`, `nr`, `vorige`, `hash` zet het register zelf) of een ongeldige waarde.
+    """
+    if body.get("soort") != "toolcall":
+        raise ScimFout(400, "de poort schrijft alleen records van soort toolcall", "invalidValue")
+    onbekend = sorted(set(body) - set(TOOLCALL_VELDEN))
+    if onbekend:
+        raise ScimFout(400, f"onbekende velden in het toolcall-record: {onbekend}", "invalidValue")
+    if not isinstance(body.get("tool"), str) or not body["tool"]:
+        raise ScimFout(400, "tool is verplicht", "invalidValue")
+    for veld in TOOLCALL_TEKST:
+        if body.get(veld) is not None and not isinstance(body[veld], str):
+            raise ScimFout(400, f"{veld} moet een string of null zijn", "invalidValue")
+    _eis_controles(body.get("controles"), body.get("beslissing"))
+    return body
+
+
+def _eis_controles(controles: Any, beslissing: Any) -> None:
+    if (
+        not isinstance(controles, dict)
+        or set(controles) != set(STAPPEN)
+        or any(uitkomst not in UITKOMSTEN for uitkomst in controles.values())
+    ):
+        raise ScimFout(400, f"controles vereist {STAPPEN} met een van {UITKOMSTEN}", "invalidValue")
+    if beslissing not in ("toegestaan", "geweigerd"):
+        raise ScimFout(400, "beslissing moet toegestaan of geweigerd zijn", "invalidValue")
+    if beslissing == "toegestaan" and set(controles.values()) != {"ok"}:
+        raise ScimFout(400, "een toegestane toolcall vereist ok voor elke stap", "invalidValue")
+
+
 async def _schrijf_toolcall(dienst: Dienst, body: dict[str, Any]) -> Response:
     """Toolcall-record van de poort; bij `toegestaan` de definitieve toelating onder het slot."""
-    if body.get("soort") != "toolcall":
-        raise ScimFout(400, "de poort schrijft alleen records van soort toolcall")
+    body = _valideer_toolcall(body)
     async with dienst.lock:
-        reden = None
-        if body.get("beslissing") == "toegestaan":
-            reden = dienst.m.controleer_toelating(body)
-            if reden is not None:
-                body = {**body, "beslissing": "geweigerd", "reden": reden}
+        afwijzing = None
+        if body["beslissing"] == "toegestaan":
+            afwijzing = dienst.m.controleer_toelating(body)
+            if afwijzing is not None:
+                body = {
+                    **body,
+                    "beslissing": "geweigerd",
+                    "reden": "toestand_gewijzigd",
+                    "toelichting": afwijzing,
+                    "controles": {**body["controles"], "logboek": "geweigerd"},
+                }
         record = dienst.opslag.log(body, dienst.klok.nu())
-    return JSONResponse(record, status_code=409 if reden else 201)
+    return JSONResponse(record, status_code=409 if afwijzing else 201)
 
 
 def _logboek(app: FastAPI, dienst: Dienst) -> None:
@@ -698,7 +908,20 @@ def maak_app(dienst: Dienst) -> FastAPI:
             ScimFout(503, str(fout)).resource(), status_code=503, media_type=scim.MEDIA
         )
 
-    _discovery(app)
+    @app.exception_handler(StarletteHTTPException)
+    async def httpfout(request: Request, fout: StarletteHTTPException) -> Response:
+        # Onbekend pad of methode onder /scim/v2: ook dan een SCIM-foutresource (RFC 7644 §3.12).
+        if not request.url.path.startswith("/scim/v2"):
+            return await http_exception_handler(request, fout)
+        return JSONResponse(
+            ScimFout(fout.status_code, str(fout.detail)).resource(),
+            status_code=fout.status_code,
+            media_type=scim.MEDIA,
+            headers=fout.headers,
+        )
+
+    _niet_ondersteund(app)
+    _discovery(app, dienst)
     _users(app, dienst)
     _groups(app, dienst)
     _beheer(app, dienst)

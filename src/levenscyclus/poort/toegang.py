@@ -250,7 +250,9 @@ class Toegang:
             record.update(beslissing="geweigerd", reden=weigering.code)
             return Besluit(False, agent, record, weigering)
         if status == 409:
-            weigering = Geweigerd("logboek", "toestand_gewijzigd", str(gelogd.get("reden")), 403)
+            weigering = Geweigerd(
+                "logboek", "toestand_gewijzigd", str(gelogd.get("toelichting")), 403
+            )
             return Besluit(False, agent, gelogd, weigering)
         return Besluit(fout is None, agent, gelogd, fout)
 
@@ -262,7 +264,9 @@ def _record(
     controles: dict[str, str],
     fout: Geweigerd | None,
 ) -> dict[str, Any]:
-    if fout is None and tool is not None:
+    if tool is not None:
+        # Stap 5 legt elk tools/call-besluit vast, ook een eerdere weigering; mislukt dat, dan
+        # zet `_log` hem op geweigerd.
         controles["logboek"] = "ok"
     return {
         "soort": "toolcall",

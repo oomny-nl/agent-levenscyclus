@@ -7,7 +7,9 @@ herkenbaar geweigerd met een SCIM-foutresource.
 from __future__ import annotations
 
 import copy
+import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from levenscyclus.assertie import controleer_jwk
@@ -26,7 +28,9 @@ URN_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Schema"
 MEDIA = "application/scim+json"
 
 RISICOKLASSEN = ("laag", "midden", "hoog")
-FILTERBAAR = ("username", "displayname", "usertype", "externalid", "id")
+FILTERBAAR = ("userName", "displayName", "userType", "externalId", "id")
+# `caseExact` (RFC 7643 §2.2, §3.1): deze waarden worden exact vergeleken, de rest niet.
+CASE_EXACT = ("id", "externalId")
 # Extensieattributen die de beheerder schrijft; de rest is readOnly en door de server bepaald.
 AGENT_SCHRIJFBAAR = (
     "eigenaar",
@@ -38,6 +42,7 @@ AGENT_SCHRIJFBAAR = (
     "herbeoordelingTermijn",
     "bevestigingstermijn",
 )
+AGENT_VERPLICHT = ("eigenaar", "doel", "vervaldatum", "risicoklasse", "publiekeSleutel")
 AGENT_CONFIGURATIE = (
     "doel",
     "vervaldatum",
@@ -72,11 +77,21 @@ KERN = (
     "members",
     URN_AGENT,
 )
+# Wat een client mag schrijven; al het andere is server-attribuut of valt buiten het profiel.
+USER_ATTRIBUTEN = ("externalId", "userName", "displayName", "userType", "active", URN_AGENT)
+GROUP_ATTRIBUTEN = ("externalId", "displayName", "members")
 USER_SERVER = ("id", "meta", "schemas", "groups")
 GROUP_SERVER = ("id", "meta", "schemas")
+# Door de server bepaald en bij schrijven genegeerd: `meta` (RFC 7643 §3.1) en `schemas`, dat
+# volgt uit `userType`.
+GENEGEERD = ("meta", "schemas")
+SUBATTRIBUTEN = ("value", "display", "$ref", "type")
 
-_FILTER_DEEL = re.compile(r'^\s*([A-Za-z][A-Za-z0-9_.:]*)\s+eq\s+"((?:[^"\\]|\\.)*)"\s*$')
-_LEDENPAD = re.compile(r'^members\[value eq "((?:[^"\\]|\\.)*)"\]$', re.IGNORECASE)
+_VERGELIJKING = re.compile(
+    r'\s*(?P<attr>[A-Za-z][A-Za-z0-9_.:-]*)\s+(?P<op>[A-Za-z]+)\s+(?P<waarde>"(?:[^"\\]|\\.)*")\s*'
+)
+_EN = re.compile(r"and\s+", re.IGNORECASE)
+_LEDENPAD = re.compile(r'^members\[value eq ("(?:[^"\\]|\\.)*")\]$', re.IGNORECASE)
 
 
 class ScimFout(Exception):
@@ -97,43 +112,100 @@ class ScimFout(Exception):
         return fout
 
 
+@dataclass(frozen=True)
+class Profiel:
+    """Wat een resourcetype in dit profiel kent.
+
+    Attributes:
+        urn: Kernschema; `<urn>:attr` is gelijk aan `attr`.
+        schrijfbaar: Kernattributen die een client mag zetten.
+        readonly: Kernattributen die een client niet mag wijzigen (RFC 7644 §3.5.2).
+        verplicht: Kernattributen die niet onbepaald mogen worden.
+        extensie: Of de agentextensie bij dit type hoort.
+    """
+
+    urn: str
+    schrijfbaar: tuple[str, ...]
+    readonly: tuple[str, ...]
+    verplicht: tuple[str, ...]
+    extensie: bool
+
+
+# `active` is in dit profiel altijd bepaald: bij aanmaak standaard true, daarna alleen te zetten.
+PROFIELEN = {
+    "User": Profiel(URN_USER, USER_ATTRIBUTEN, ("id", "groups"), ("userName", "active"), True),
+    "Group": Profiel(URN_GROUP, GROUP_ATTRIBUTEN, ("id",), ("displayName",), False),
+}
+
+
+# Filter --------------------------------------------------------------------------------------
+
+
 def parse_filter(tekst: str) -> list[tuple[str, str]]:
-    """Ontleed `attr eq "waarde"` (met `and`) tot (attribuut in kleine letters, waarde)-paren.
+    """Ontleed `attr eq "waarde"`, eventueel met `and`, tot (attribuut, waarde)-paren.
+
+    Operator en `and` zijn hoofdletterongevoelig; de waarde is een JSON-string (RFC 7644
+    §3.4.2.2) en mag zelf spaties, `and` of escapes bevatten.
 
     Raises:
         ScimFout: `400 invalidFilter` voor alles buiten het profiel.
     """
-    delen = re.split(r"\s+and\s+", tekst.strip(), flags=re.IGNORECASE)
     paren = []
-    for deel in delen:
-        gevonden = _FILTER_DEEL.match(deel)
+    positie = 0
+    while True:
+        gevonden = _VERGELIJKING.match(tekst, positie)
         if gevonden is None:
-            raise ScimFout(
-                400,
-                f'filter {deel!r} valt buiten het profiel: alleen attr eq "waarde", met and',
-                "invalidFilter",
-            )
-        attribuut = gevonden.group(1).lower()
-        if attribuut not in FILTERBAAR:
-            raise ScimFout(
-                400, f"filteren op {gevonden.group(1)!r} wordt niet ondersteund", "invalidFilter"
-            )
-        paren.append((attribuut, gevonden.group(2).replace('\\"', '"')))
-    return paren
+            raise _filterfout(tekst[positie:])
+        paren.append(_vergelijking(gevonden))
+        positie = gevonden.end()
+        if positie == len(tekst):
+            return paren
+        en = _EN.match(tekst, positie)
+        if en is None:
+            raise _filterfout(tekst[positie:])
+        positie = en.end()
+
+
+def _filterfout(rest: str) -> ScimFout:
+    return ScimFout(
+        400,
+        f'filter valt buiten het profiel bij {rest!r}: alleen attr eq "waarde", met and',
+        "invalidFilter",
+    )
+
+
+def _vergelijking(gevonden: re.Match[str]) -> tuple[str, str]:
+    attribuut, op = gevonden.group("attr"), gevonden.group("op")
+    if op.lower() != "eq":
+        raise ScimFout(400, f"operator {op!r} wordt niet ondersteund; alleen eq", "invalidFilter")
+    naam = canonieke_naam(zonder_kernprefix(attribuut), FILTERBAAR)
+    if naam not in FILTERBAAR:
+        raise ScimFout(400, f"filteren op {attribuut!r} wordt niet ondersteund", "invalidFilter")
+    try:
+        waarde = json.loads(gevonden.group("waarde"))
+    except ValueError as fout:
+        raise ScimFout(400, f"ongeldige string in filter: {fout}", "invalidFilter") from fout
+    return naam, waarde
 
 
 def voldoet(resource: dict[str, Any], paren: list[tuple[str, str]]) -> bool:
-    """Of een resource aan alle filterparen voldoet (tekstueel, hoofdletterongevoelig)."""
-    sleutels = {k.lower(): k for k in resource}
-    for attribuut, waarde in paren:
-        echt = sleutels.get(attribuut)
-        huidig = resource.get(echt) if echt else None
-        if huidig is None or str(huidig).lower() != waarde.lower():
-            return False
-    return True
+    """Of een resource aan alle filterparen voldoet; `caseExact`-attributen exact vergeleken.
+
+    Hoofdletterongevoelig vergelijken gebeurt met `lower()`, net als de uniciteitssleutel van
+    `userName` en `displayName` in de opslag.
+    """
+    return all(_gelijk(attribuut, resource.get(attribuut), waarde) for attribuut, waarde in paren)
 
 
-# Attribuutnamen ----------------------------------------------------------------------------------
+def _gelijk(attribuut: str, huidig: Any, waarde: str) -> bool:
+    if not isinstance(huidig, str):
+        return False
+    if attribuut in CASE_EXACT:
+        return huidig == waarde
+    return huidig.lower() == waarde.lower()
+
+
+# Attribuutnamen ------------------------------------------------------------------------------
 
 
 def canonieke_naam(naam: str, bekend: tuple[str, ...]) -> str:
@@ -159,138 +231,230 @@ def normaliseer_namen(waarden: dict[str, Any], bekend: tuple[str, ...]) -> dict[
     return uit
 
 
+def zonder_kernprefix(naam: str) -> str:
+    """`urn:ietf:params:scim:schemas:core:2.0:User:userName` wordt `userName`."""
+    for urn in (URN_USER, URN_GROUP):
+        if naam.lower().startswith(urn.lower() + ":"):
+            return naam[len(urn) + 1 :]
+    return naam
+
+
+# PATCH ---------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Operatie:
+    """Eén structureel geldige PATCH-operatie (RFC 7644 §3.5.2)."""
+
+    op: str
+    pad: str | None
+    waarde: Any
+
+
+def patchoperaties(body: dict[str, Any]) -> list[Operatie]:
+    """Controleer de structuur van een PatchOp-bericht en geef de operaties.
+
+    Raises:
+        ScimFout: `400 invalidSyntax` bij een ongeldige berichtstructuur, `400 invalidPath` bij
+            een `path` dat geen tekst is, `400 invalidValue` bij `add` zonder waarde.
+    """
+    bericht = normaliseer_namen(body, ("schemas", "Operations"))
+    schemas = bericht.get("schemas")
+    if not isinstance(schemas, list) or URN_PATCH.lower() not in {
+        s.lower() for s in schemas if isinstance(s, str)
+    }:
+        raise ScimFout(400, f"schemas moet een lijst met {URN_PATCH} zijn", "invalidSyntax")
+    operaties = bericht.get("Operations")
+    if not isinstance(operaties, list) or not operaties:
+        raise ScimFout(400, "Operations moet een niet-lege lijst zijn", "invalidSyntax")
+    return [_operatie(ruw) for ruw in operaties]
+
+
+def _operatie(ruw: Any) -> Operatie:
+    if not isinstance(ruw, dict):
+        raise ScimFout(400, "elke operatie moet een object zijn", "invalidSyntax")
+    operatie = normaliseer_namen(ruw, ("op", "path", "value"))
+    op = operatie.get("op")
+    if not isinstance(op, str) or op.lower() not in ("add", "remove", "replace"):
+        raise ScimFout(400, f"op moet add, remove of replace zijn, niet {op!r}", "invalidSyntax")
+    op = op.lower()
+    if op != "remove" and "value" not in operatie:
+        raise ScimFout(400, f"{op} vereist value", "invalidSyntax")
+    if op == "add" and operatie["value"] is None:
+        raise ScimFout(400, "add vereist een waarde, geen null", "invalidValue")
+    pad = operatie.get("path")
+    if pad is not None and (not isinstance(pad, str) or not pad.strip()):
+        raise ScimFout(400, "path moet een niet-lege tekst zijn", "invalidPath")
+    return Operatie(op, pad.strip() if pad is not None else None, operatie.get("value"))
+
+
 def schakelaar_uit_patch(body: dict[str, Any]) -> bool | None:
     """De `active`-waarde die een PatchOp expliciet zet, of None als hij `active` niet raakt."""
     gezet: bool | None = None
-    for operatie in body.get("Operations") or []:
-        if not isinstance(operatie, dict):
-            continue
-        pad, waarde = operatie.get("path"), operatie.get("value")
-        if pad is None and isinstance(waarde, dict):
+    for operatie in patchoperaties(body):
+        waarde = operatie.waarde
+        if operatie.pad is None and isinstance(waarde, dict):
             waarde = normaliseer_namen(waarde, KERN).get("active")
-        elif pad is None or _splits_pad(str(pad))[1].lower() != "active":
+        elif operatie.pad is None or zonder_kernprefix(operatie.pad).lower() != "active":
             continue
         if isinstance(waarde, bool):
             gezet = waarde
     return gezet
 
 
-# PATCH -------------------------------------------------------------------------------------------
+def pas_patch_toe(resource: dict[str, Any], body: dict[str, Any], soort: str) -> dict[str, Any]:
+    """Pas een PatchOp toe op een kopie; faalt één operatie, dan verandert niets.
+
+    Args:
+        resource: De huidige resource.
+        body: Het PatchOp-bericht.
+        soort: `User` of `Group`.
+
+    Raises:
+        ScimFout: Bij een ongeldig bericht (`invalidSyntax`), een pad buiten het profiel
+            (`invalidPath`) of een readOnly of verplicht doel (`mutability`).
+    """
+    profiel = PROFIELEN[soort]
+    nieuw = copy.deepcopy(resource)
+    for operatie in patchoperaties(body):
+        if operatie.pad is None:
+            _patch_zonder_pad(nieuw, operatie, profiel)
+        else:
+            _patch_pad(nieuw, operatie, profiel)
+    return nieuw
 
 
-def _splits_pad(pad: str) -> tuple[str | None, str]:
-    """Splits `urn:...:attr` in (urn, attr); zonder urn is de eerste None."""
-    if ":" in pad:
-        urn, _, attr = pad.rpartition(":")
-        return urn, attr
-    return None, pad
+def _patch_zonder_pad(resource: dict[str, Any], operatie: Operatie, profiel: Profiel) -> None:
+    if operatie.op == "remove":
+        raise ScimFout(400, "remove vereist een path", "noTarget")
+    if not isinstance(operatie.waarde, dict):
+        raise ScimFout(400, "add/replace zonder path verwacht een object", "invalidValue")
+    for sleutel, inhoud in normaliseer_namen(operatie.waarde, KERN).items():
+        if profiel.extensie and sleutel == URN_AGENT:
+            if not isinstance(inhoud, dict):
+                raise ScimFout(400, f"{URN_AGENT} verwacht een object", "invalidValue")
+            for sub, subwaarde in inhoud.items():
+                _patch_extensie(resource, operatie.op, sub, subwaarde)
+        else:
+            _patch_pad(resource, Operatie(operatie.op, sleutel, inhoud), profiel)
 
 
-def _doel(resource: dict[str, Any], urn: str | None) -> dict[str, Any]:
-    if urn is None:
-        return resource
-    if urn.lower() == URN_AGENT.lower():
-        return resource.setdefault(URN_AGENT, {})
-    if urn.lower() in (URN_USER.lower(), URN_GROUP.lower()):
-        return resource
-    raise ScimFout(400, f"onbekend schema in path: {urn}", "invalidPath")
+def _splits_pad(pad: str, profiel: Profiel) -> tuple[bool, str]:
+    """(in de extensie, attribuut) voor `attr`, `<kernschema>:attr` of `<extensie>:attr`."""
+    lager = pad.lower()
+    if profiel.extensie and lager.startswith(URN_AGENT.lower() + ":"):
+        return True, pad[len(URN_AGENT) + 1 :]
+    if lager.startswith(profiel.urn.lower() + ":"):
+        return False, pad[len(profiel.urn) + 1 :]
+    if lager.startswith("urn:"):
+        raise ScimFout(400, f"onbekend schema in path: {pad}", "invalidPath")
+    return False, pad
+
+
+def _patch_pad(resource: dict[str, Any], operatie: Operatie, profiel: Profiel) -> None:
+    in_extensie, attr = _splits_pad(str(operatie.pad), profiel)
+    if in_extensie:
+        _patch_extensie(resource, operatie.op, attr, operatie.waarde)
+    elif "members" in profiel.schrijfbaar and (attr.lower() == "members" or _LEDENPAD.match(attr)):
+        _patch_leden(resource, operatie.op, attr, operatie.waarde)
+    else:
+        _patch_kern(resource, operatie, attr, profiel)
+
+
+def _alleen_topniveau(attr: str) -> None:
+    if "[" in attr or "." in attr:
+        raise ScimFout(
+            400, f"path {attr!r} valt buiten het profiel: alleen hele attributen", "invalidPath"
+        )
+
+
+def _patch_kern(resource: dict[str, Any], operatie: Operatie, attr: str, profiel: Profiel) -> None:
+    _alleen_topniveau(attr)
+    naam = canonieke_naam(attr, (*profiel.schrijfbaar, *profiel.readonly, *GENEGEERD))
+    if naam in GENEGEERD:
+        return
+    if naam in profiel.readonly:
+        _eis_ongewijzigd(resource, operatie.op, naam, operatie.waarde)
+    elif naam in profiel.schrijfbaar and naam != URN_AGENT:
+        _zet(resource, operatie.op, naam, operatie.waarde, profiel.verplicht)
+    else:
+        raise ScimFout(400, f"attribuut {attr!r} bestaat niet in dit profiel", "invalidPath")
+
+
+def _patch_extensie(resource: dict[str, Any], op: str, attr: str, waarde: Any) -> None:
+    _alleen_topniveau(attr)
+    if not is_agent(resource):
+        raise ScimFout(400, "de agentextensie bestaat alleen bij userType agent", "invalidPath")
+    ext = resource.setdefault(URN_AGENT, {})
+    naam = canonieke_naam(attr, AGENT_ATTRIBUTEN)
+    if naam in AGENT_READONLY:
+        _eis_ongewijzigd(ext, op, naam, waarde)
+    elif naam in AGENT_SCHRIJFBAAR:
+        _zet(ext, op, naam, waarde, AGENT_VERPLICHT)
+    else:
+        raise ScimFout(400, f"extensieattribuut {attr!r} bestaat niet", "invalidPath")
+
+
+def _eis_ongewijzigd(doel: dict[str, Any], op: str, naam: str, waarde: Any) -> None:
+    """ReadOnly: alleen de huidige waarde mag terugkomen (RFC 7644 §3.5.2 en §3.5.2.2)."""
+    if op == "remove" or waarde is None or doel.get(naam) != waarde:
+        raise ScimFout(400, f"{naam} is readOnly en kan niet worden gewijzigd", "mutability")
+
+
+def _zet(doel: dict[str, Any], op: str, naam: str, waarde: Any, verplicht: tuple[str, ...]) -> None:
+    """Pas één operatie toe; null is onbepaald (RFC 7643 §2.5), ook bij `replace`."""
+    if op == "remove" or waarde is None:
+        if naam in verplicht:
+            raise ScimFout(400, f"{naam} is verplicht en kan niet weg", "mutability")
+        doel.pop(naam, None)
+    elif op == "add" and isinstance(doel.get(naam), list) and isinstance(waarde, list):
+        doel[naam] = doel[naam] + [w for w in waarde if w not in doel[naam]]
+    else:
+        doel[naam] = waarde
 
 
 def _patch_leden(resource: dict[str, Any], op: str, pad: str, waarde: Any) -> None:
-    """`members`, `members[value eq "id"]`."""
+    """`members` en `members[value eq "id"]`; een niet-lid verwijderen is een succes."""
     leden: list[dict[str, Any]] = list(resource.get("members") or [])
     gefilterd = _LEDENPAD.match(pad)
     if gefilterd:
         if op != "remove":
             raise ScimFout(400, "alleen remove op members[value eq ...]", "invalidPath")
-        resource["members"] = [m for m in leden if m.get("value") != gefilterd.group(1)]
+        try:
+            weg = {json.loads(gefilterd.group(1))}
+        except ValueError as fout:
+            raise ScimFout(400, f"ongeldige string in path: {fout}", "invalidPath") from fout
+    elif op == "remove" or waarde is None:
+        weg = None if waarde is None else set(_leden_ids(waarde))
+    else:
+        nieuw = list(dict.fromkeys(_leden_ids(waarde)))
+        bestaand = [] if op == "replace" else [m["value"] for m in leden]
+        resource["members"] = [{"value": v} for v in dict.fromkeys(bestaand + nieuw)]
         return
-    if op == "remove":
-        if waarde is None:
-            resource["members"] = []
-        else:
-            weg = {m.get("value") for m in _lijst(waarde)}
-            resource["members"] = [m for m in leden if m.get("value") not in weg]
-        return
-    nieuw = [{"value": str(m.get("value"))} for m in _lijst(waarde)]
-    if op == "replace":
-        resource["members"] = nieuw
-        return
-    bestaand = {m.get("value") for m in leden}
-    resource["members"] = leden + [m for m in nieuw if m["value"] not in bestaand]
+    resource["members"] = [] if weg is None else [m for m in leden if m.get("value") not in weg]
 
 
-def _lijst(waarde: Any) -> list[dict[str, Any]]:
+def _leden_ids(waarde: Any) -> list[str]:
+    """De `value` van elk member-object; subattribuutnamen hoofdletterongevoelig."""
     if not isinstance(waarde, list) or not all(isinstance(m, dict) for m in waarde):
         raise ScimFout(400, "members verwacht een lijst van {value}-objecten", "invalidValue")
-    return waarde
+    ids = [normaliseer_namen(lid, SUBATTRIBUTEN).get("value") for lid in waarde]
+    if not all(isinstance(i, str) and i for i in ids):
+        raise ScimFout(400, "elk member vereist een value", "invalidValue")
+    return [str(i) for i in ids]
 
 
-def _patch_attribuut(resource: dict[str, Any], op: str, pad: str, waarde: Any) -> None:
-    urn, attr = _splits_pad(pad)
-    if attr.lower() == "members" or _LEDENPAD.match(attr):
-        _patch_leden(resource, op, attr, waarde)
-        return
-    if "[" in attr or "." in attr:
-        raise ScimFout(400, f"path {pad!r} valt buiten het profiel", "invalidPath")
-    doel = _doel(resource, urn)
-    bekend = AGENT_ATTRIBUTEN if doel is not resource else KERN
-    attr = canonieke_naam(attr, (*bekend, *doel))
-    if op == "remove":
-        doel.pop(attr, None)
-    elif op == "add" and isinstance(doel.get(attr), list) and isinstance(waarde, list):
-        doel[attr] = doel[attr] + [w for w in waarde if w not in doel[attr]]
-    else:
-        doel[attr] = waarde
-
-
-def _patch_zonder_pad(resource: dict[str, Any], op: str, waarde: Any) -> None:
-    if op == "remove":
-        raise ScimFout(400, "remove vereist een path", "noTarget")
-    if not isinstance(waarde, dict):
-        raise ScimFout(400, "add/replace zonder path verwacht een object", "invalidValue")
-    for sleutel, inhoud in waarde.items():
-        if sleutel.lower() == URN_AGENT.lower() and isinstance(inhoud, dict):
-            for sub, subwaarde in inhoud.items():
-                _patch_attribuut(resource, op, f"{URN_AGENT}:{sub}", subwaarde)
-        else:
-            _patch_attribuut(resource, op, sleutel, inhoud)
-
-
-def pas_patch_toe(resource: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
-    """Pas een PatchOp toe op een kopie; faalt één operatie, dan verandert niets.
-
-    Raises:
-        ScimFout: Bij een ongeldig PatchOp-bericht of een pad buiten het profiel.
-    """
-    if URN_PATCH not in body.get("schemas", []):
-        raise ScimFout(400, f"schemas moet {URN_PATCH} bevatten", "invalidValue")
-    operaties = body.get("Operations")
-    if not isinstance(operaties, list) or not operaties:
-        raise ScimFout(400, "Operations ontbreekt of is leeg", "invalidValue")
-    nieuw = copy.deepcopy(resource)
-    for operatie in operaties:
-        op = str(operatie.get("op", "")).lower()
-        if op not in ("add", "remove", "replace"):
-            raise ScimFout(400, f"onbekende op {operatie.get('op')!r}", "invalidValue")
-        pad = operatie.get("path")
-        if pad is None:
-            _patch_zonder_pad(nieuw, op, operatie.get("value"))
-        else:
-            _patch_attribuut(nieuw, op, str(pad), operatie.get("value"))
-    return nieuw
-
-
-# Validatie ---------------------------------------------------------------------------------------
+# Validatie -----------------------------------------------------------------------------------
 
 
 def is_agent(resource: dict[str, Any]) -> bool:
-    """Of een User-resource een agent is."""
-    return str(resource.get("userType", "")).lower() == "agent"
+    """Of een User-resource een agent is (`userType` hoofdletterongevoelig `agent`)."""
+    soort = resource.get("userType")
+    return isinstance(soort, str) and soort.lower() == "agent"
 
 
 def strip_server(resource: dict[str, Any], readonly: tuple[str, ...]) -> dict[str, Any]:
-    """Verwijder server- en readOnly-attributen uit een clientbody (RFC 7644 §3.5.1)."""
+    """Verwijder server- en readOnly-attributen uit een clientbody (RFC 7644 §3.3, §3.5.1)."""
     schoon = {k: v for k, v in normaliseer_namen(resource, KERN).items() if k not in readonly}
     ext = schoon.get(URN_AGENT)
     if isinstance(ext, dict):
@@ -299,47 +463,67 @@ def strip_server(resource: dict[str, Any], readonly: tuple[str, ...]) -> dict[st
     return schoon
 
 
+def _zonder_null(waarden: dict[str, Any]) -> dict[str, Any]:
+    """Null is gelijk aan niet toegekend (RFC 7643 §2.5)."""
+    return {k: v for k, v in waarden.items() if v is not None}
+
+
+def _eis_bekend(waarden: dict[str, Any], bekend: tuple[str, ...], wat: str) -> None:
+    onbekend = sorted(set(waarden) - set(bekend))
+    if onbekend:
+        raise ScimFout(400, f"{wat} buiten het profiel: {onbekend}", "invalidValue")
+
+
+def _eis_tekst(waarden: dict[str, Any], *namen: str) -> None:
+    for naam in namen:
+        if naam in waarden and not isinstance(waarden[naam], str):
+            raise ScimFout(400, f"{naam} moet een string zijn", "invalidValue")
+
+
+def _verplichte_tekst(waarden: dict[str, Any], naam: str) -> str:
+    waarde = waarden.get(naam)
+    if not isinstance(waarde, str) or not waarde.strip():
+        raise ScimFout(400, f"{naam} is verplicht", "invalidValue")
+    return waarde.strip()
+
+
 def valideer_user(resource: dict[str, Any]) -> dict[str, Any]:
     """Controleer een User (mens of agent) en normaliseer; geeft de genormaliseerde resource.
 
+    Verwacht de uitkomst van `strip_server`: canonieke namen, zonder server-attributen.
+
     Raises:
-        ScimFout: `400 invalidValue` bij ontbrekende of ongeldige attributen.
+        ScimFout: `400 invalidValue` bij ontbrekende, onbekende of ongeldige attributen.
     """
-    naam = resource.get("userName")
-    if not isinstance(naam, str) or not naam.strip():
-        raise ScimFout(400, "userName is verplicht", "invalidValue")
-    resource["userName"] = naam.strip()
+    resource = _zonder_null(resource)
+    _eis_bekend(resource, USER_ATTRIBUTEN, "attributen")
+    _eis_tekst(resource, "displayName", "userType", "externalId")
+    resource["userName"] = _verplichte_tekst(resource, "userName")
     resource.setdefault("active", True)
     if not isinstance(resource["active"], bool):
         raise ScimFout(400, "active moet een boolean zijn", "invalidValue")
-    for sleutel in list(resource):
-        if sleutel.lower() == URN_AGENT.lower() and sleutel != URN_AGENT:
-            resource[URN_AGENT] = resource.pop(sleutel)
     if is_agent(resource):
+        resource["userType"] = "agent"
         resource[URN_AGENT] = _valideer_agentextensie(resource.get(URN_AGENT))
         resource["schemas"] = [URN_USER, URN_AGENT]
+    elif URN_AGENT in resource:
+        raise ScimFout(
+            400, "de agentextensie is alleen toegestaan bij userType agent", "invalidValue"
+        )
     else:
-        if URN_AGENT in resource:
-            raise ScimFout(
-                400, "de agentextensie is alleen toegestaan bij userType agent", "invalidValue"
-            )
         resource["schemas"] = [URN_USER]
     return resource
 
 
-def _valideer_agentextensie(ext: Any) -> dict[str, Any]:  # noqa: C901
-    if not isinstance(ext, dict):
+def _valideer_agentextensie(ruw: Any) -> dict[str, Any]:
+    if not isinstance(ruw, dict):
         raise ScimFout(400, f"een agent vereist de extensie {URN_AGENT}", "invalidValue")
-    onbekend = set(ext) - set(AGENT_SCHRIJFBAAR) - set(AGENT_READONLY)
-    if onbekend:
-        raise ScimFout(400, f"onbekende extensieattributen: {sorted(onbekend)}", "invalidValue")
-    eigenaar = ext.get("eigenaar")
-    if not isinstance(eigenaar, dict) or not isinstance(eigenaar.get("value"), str):
-        raise ScimFout(400, "eigenaar.value (SCIM-id van de eigenaar) is verplicht", "invalidValue")
-    ext["eigenaar"] = {"value": eigenaar["value"]}
+    ext = _zonder_null(ruw)
+    _eis_bekend(ext, AGENT_ATTRIBUTEN, "extensieattributen")
+    ext["eigenaar"] = {"value": _eigenaar_id(ext.get("eigenaar"))}
     for verplicht in ("doel", "vervaldatum", "publiekeSleutel"):
-        if not isinstance(ext.get(verplicht), str) or not ext[verplicht].strip():
-            raise ScimFout(400, f"{verplicht} is verplicht", "invalidValue")
+        _verplichte_tekst(ext, verplicht)
+    _eis_tekst(ext, "herbeoordelingTermijn", "bevestigingstermijn")
     if ext.get("risicoklasse") not in RISICOKLASSEN:
         raise ScimFout(400, f"risicoklasse moet een van {RISICOKLASSEN} zijn", "invalidValue")
     try:
@@ -347,7 +531,7 @@ def _valideer_agentextensie(ext: Any) -> dict[str, Any]:  # noqa: C901
         controleer_jwk(ext["publiekeSleutel"])
         for termijn in ("herbeoordelingTermijn", "bevestigingstermijn"):
             if termijn in ext:
-                parse_duur(str(ext[termijn]))
+                parse_duur(ext[termijn])
     except ValueError as fout:
         raise ScimFout(400, str(fout), "invalidValue") from fout
     tools = ext.get("toegestaneTools", [])
@@ -357,22 +541,26 @@ def _valideer_agentextensie(ext: Any) -> dict[str, Any]:  # noqa: C901
     return ext
 
 
+def _eigenaar_id(eigenaar: Any) -> str:
+    if isinstance(eigenaar, dict):
+        waarde = normaliseer_namen(eigenaar, SUBATTRIBUTEN).get("value")
+        if isinstance(waarde, str) and waarde:
+            return waarde
+    raise ScimFout(400, "eigenaar.value (SCIM-id van de eigenaar) is verplicht", "invalidValue")
+
+
 def valideer_group(resource: dict[str, Any]) -> dict[str, Any]:
-    """Controleer een Group en normaliseer de leden tot `{value}`."""
-    naam = resource.get("displayName")
-    if not isinstance(naam, str) or not naam.strip():
-        raise ScimFout(400, "displayName is verplicht", "invalidValue")
-    resource["displayName"] = naam.strip()
-    leden = resource.get("members") or []
-    if not isinstance(leden, list):
-        raise ScimFout(400, "members moet een lijst zijn", "invalidValue")
-    gezien: list[str] = []
-    for lid in leden:
-        if not isinstance(lid, dict) or not isinstance(lid.get("value"), str):
-            raise ScimFout(400, "elk member vereist value", "invalidValue")
-        if lid["value"] not in gezien:
-            gezien.append(lid["value"])
-    resource["members"] = [{"value": v} for v in gezien]
+    """Controleer een Group en normaliseer de leden tot `{value}`.
+
+    Raises:
+        ScimFout: `400 invalidValue` bij ontbrekende, onbekende of ongeldige attributen.
+    """
+    resource = _zonder_null(resource)
+    _eis_bekend(resource, GROUP_ATTRIBUTEN, "attributen")
+    _eis_tekst(resource, "externalId")
+    resource["displayName"] = _verplichte_tekst(resource, "displayName")
+    leden = dict.fromkeys(_leden_ids(resource.get("members", [])))
+    resource["members"] = [{"value": v} for v in leden]
     resource["schemas"] = [URN_GROUP]
     return resource
 
@@ -382,7 +570,7 @@ def leden_van(groep: dict[str, Any]) -> set[str]:
     return {str(m.get("value")) for m in groep.get("members") or []}
 
 
-# Discovery ---------------------------------------------------------------------------------------
+# Discovery -----------------------------------------------------------------------------------
 
 
 def _attr(naam: str, typ: str = "string", **extra: Any) -> dict[str, Any]:
@@ -400,8 +588,16 @@ def _attr(naam: str, typ: str = "string", **extra: Any) -> dict[str, Any]:
     return basis
 
 
-def agentschema() -> dict[str, Any]:
-    """Het extensieschema als SCIM-Schema-resource."""
+def _ref(soort: str) -> dict[str, Any]:
+    return _attr("$ref", "reference", mutability="readOnly", referenceTypes=[soort])
+
+
+def _schemameta(basis: str, urn: str) -> dict[str, str]:
+    return {"resourceType": "Schema", "location": f"{basis}/scim/v2/Schemas/{urn}"}
+
+
+def agentschema(basis: str) -> dict[str, Any]:
+    """Het extensieschema als SCIM-Schema-resource; `basis` is de externe basis-URL."""
     readonly = {"mutability": "readOnly"}
     return {
         "schemas": [URN_SCHEMA],
@@ -414,8 +610,8 @@ def agentschema() -> dict[str, Any]:
                 "complex",
                 required=True,
                 subAttributes=[
-                    _attr("value", required=True, mutability="readWrite"),
-                    _attr("$ref", "reference", mutability="readOnly", referenceTypes=["User"]),
+                    _attr("value", required=True, caseExact=True),
+                    _ref("User"),
                     _attr("display", mutability="readOnly"),
                 ],
             ),
@@ -435,11 +631,11 @@ def agentschema() -> dict[str, Any]:
             _attr("statusReden", **readonly),
             _attr("bevestigdeVersie", **readonly),
         ],
-        "meta": {"resourceType": "Schema", "location": f"/scim/v2/Schemas/{URN_AGENT}"},
+        "meta": _schemameta(basis, URN_AGENT),
     }
 
 
-def kernschemas() -> list[dict[str, Any]]:
+def kernschemas(basis: str) -> list[dict[str, Any]]:
     """Core User en Group, beperkt tot de attributen die dit profiel gebruikt."""
     user = {
         "schemas": [URN_SCHEMA],
@@ -457,23 +653,29 @@ def kernschemas() -> list[dict[str, Any]]:
                 multiValued=True,
                 mutability="readOnly",
                 subAttributes=[
-                    _attr("value", mutability="readOnly"),
+                    _attr("value", mutability="readOnly", caseExact=True),
+                    _ref("Group"),
                     _attr("display", mutability="readOnly"),
                 ],
             ),
         ],
-        "meta": {"resourceType": "Schema", "location": f"/scim/v2/Schemas/{URN_USER}"},
+        "meta": _schemameta(basis, URN_USER),
     }
     group = {
         "schemas": [URN_SCHEMA],
         "id": URN_GROUP,
         "name": "Group",
         "attributes": [
-            _attr("displayName", required=True),
+            _attr("displayName", required=True, uniqueness="server"),
             _attr("externalId", caseExact=True),
-            _attr("members", "complex", multiValued=True, subAttributes=[_attr("value")]),
+            _attr(
+                "members",
+                "complex",
+                multiValued=True,
+                subAttributes=[_attr("value", caseExact=True, mutability="immutable")],
+            ),
         ],
-        "meta": {"resourceType": "Schema", "location": f"/scim/v2/Schemas/{URN_GROUP}"},
+        "meta": _schemameta(basis, URN_GROUP),
     }
     return [user, group]
 
@@ -489,8 +691,9 @@ def lijstantwoord(resources: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def resource_types() -> list[dict[str, Any]]:
-    """ResourceTypes met de extensie op User."""
+def resource_types(basis: str) -> list[dict[str, Any]]:
+    """ResourceTypes met de extensie op User; `basis` is de externe basis-URL."""
+    locatie = f"{basis}/scim/v2/ResourceTypes"
     return [
         {
             "schemas": [URN_RT],
@@ -499,7 +702,7 @@ def resource_types() -> list[dict[str, Any]]:
             "endpoint": "/Users",
             "schema": URN_USER,
             "schemaExtensions": [{"schema": URN_AGENT, "required": False}],
-            "meta": {"resourceType": "ResourceType", "location": "/scim/v2/ResourceTypes/User"},
+            "meta": {"resourceType": "ResourceType", "location": f"{locatie}/User"},
         },
         {
             "schemas": [URN_RT],
@@ -507,13 +710,13 @@ def resource_types() -> list[dict[str, Any]]:
             "name": "Group",
             "endpoint": "/Groups",
             "schema": URN_GROUP,
-            "meta": {"resourceType": "ResourceType", "location": "/scim/v2/ResourceTypes/Group"},
+            "meta": {"resourceType": "ResourceType", "location": f"{locatie}/Group"},
         },
     ]
 
 
-def service_provider_config() -> dict[str, Any]:
-    """ServiceProviderConfig volgens het profiel."""
+def service_provider_config(basis: str) -> dict[str, Any]:
+    """ServiceProviderConfig volgens het profiel; `basis` is de externe basis-URL."""
     return {
         "schemas": [URN_SPC],
         "documentationUri": "https://github.com/oomny-nl/agent-levenscyclus",
@@ -534,6 +737,6 @@ def service_provider_config() -> dict[str, Any]:
         ],
         "meta": {
             "resourceType": "ServiceProviderConfig",
-            "location": "/scim/v2/ServiceProviderConfig",
+            "location": f"{basis}/scim/v2/ServiceProviderConfig",
         },
     }
