@@ -11,7 +11,9 @@ FGA_CLI := openfga/cli:v0.8.2@sha256:31a565d14d1c5ca8170d3a2225eb66517d9f4905399
 	printf 'OPENFGA_PRESHARED_KEY=%s\n' "$$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" >> .env
 
 ## demo: start de keten schoon en speel de vijf scenario's af (één commando)
-demo: up speel
+# Eerst `up`, dan pas `speel`: ook met `make -j` start de demo niet tegen een halve keten
+demo: up
+	@$(MAKE) --no-print-directory speel
 
 ## up: start OpenFGA, register en poort vanuit een schone toestand
 up: .env
@@ -28,19 +30,24 @@ opname: up
 	vhs demo/demo.tape
 	grep -q "Alle scenario's gaven de uitkomst uit het ontwerp" demo/opname.txt
 	! grep -E -q "Traceback|wijkt af van het ontwerp" demo/opname.txt
-	timeout 600 ffmpeg -nostdin -y -loglevel error -i docs/beeld/demo.mp4 \
+	ffmpeg -nostdin -y -loglevel error -i docs/beeld/demo.mp4 \
 		-vf "fps=6,scale=1100:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=24:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle" \
 		docs/beeld/demo.gif
 
 PYTEST := pytest -m integratie -p no:cacheprovider
 
 ## integratie: alle integratietests tegen de echte keten, de netwerkgrens vanuit de
-## demo-container en herstel na een herstart van OpenFGA (in-memory: store en tuples weg)
+## demo-container en herstel na een herstart van OpenFGA (in-memory: store en tuples weg).
+## OPENFGA_IP is het interne adres van OpenFGA volgens Docker: de tests-container moet het bereiken,
+## de demo-container niet (ook niet zonder DNS).
 integratie: .env
 	$(DOWN)
 	$(COMPOSE) up -d --build --wait
-	$(COMPOSE) run --rm tests
-	$(COMPOSE) run --rm -e DEMO_NETWERKTEST=1 demo $(PYTEST) tests/integratie/test_netwerkgrens.py
+	ip=$$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+		$$($(COMPOSE) ps -q openfga)) && test -n "$$ip" && \
+	$(COMPOSE) run --rm -e OPENFGA_IP=$$ip tests && \
+	$(COMPOSE) run --rm -e OPENFGA_IP=$$ip -e DEMO_NETWERKTEST=1 demo \
+		$(PYTEST) tests/integratie/test_netwerkgrens.py
 	$(COMPOSE) run --rm -e STOREVERLIES_FASE=voor tests $(PYTEST) tests/integratie/test_storeverlies.py
 	$(COMPOSE) restart openfga
 	$(COMPOSE) up -d --wait openfga

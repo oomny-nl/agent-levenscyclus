@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 
 from levenscyclus.register.scim import URN_AGENT, URN_LIST
@@ -106,3 +107,15 @@ async def test_discovery_geeft_listresponse(register: Register) -> None:
         assert antwoord["totalResults"] == len(antwoord["Resources"]) >= 2
     schemas = (await register.http.get("/scim/v2/Schemas")).json()["Resources"]
     assert URN_AGENT in {s["id"] for s in schemas}
+
+
+async def test_agent_met_punt_buiten_de_kromme_geweigerd(register: Register) -> None:
+    eigenaar = await register.mens("sanne")
+    agent = await register.agent(eigenaar)
+    jwk = json.loads(register.opgeslagen(agent)["publiekeSleutel"])
+    jwk["y"] = jwk["x"]
+    operatie = [{"op": "replace", "path": f"{URN_AGENT}:publiekeSleutel", "value": json.dumps(jwk)}]
+    antwoord = await register.patch(f"/scim/v2/Users/{agent}", "beheerder", operatie)
+    assert antwoord.status_code == 400
+    assert antwoord.json()["scimType"] == "invalidValue"
+    assert "P-256" in antwoord.json()["detail"]

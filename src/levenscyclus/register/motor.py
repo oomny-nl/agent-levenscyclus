@@ -45,6 +45,14 @@ STATUSVELDEN = (
     "volgendeHerbeoordeling",
     "bevestigingsdeadline",
 )
+# Tuples die het register schrijft, met per relatie de kant waar de gebruiker of agent staat wiens
+# synchronisatie de tuple bezit. `dossier#team` is van de poort en valt erbuiten.
+REGISTER_TUPLES = {
+    ("gebruiker", "agent"): "user",
+    ("agent", "eigenaar"): "object",
+    ("team", "lid"): "user",
+    ("tool", "toegestaan"): "user",
+}
 
 
 @dataclass(frozen=True)
@@ -113,6 +121,14 @@ def _zet(e: dict[str, Any], status: str, reden: str, sinds: datetime) -> None:
     e.pop("bevestigingsdeadline", None)
 
 
+def bezitter(t: Tuple) -> str | None:
+    """Id van de gebruiker of agent die een register-tuple bezit; None voor andere tuples."""
+    kant = REGISTER_TUPLES.get((t.object.partition(":")[0], t.relation))
+    if kant is None:
+        return None
+    return (t.user if kant == "user" else t.object).partition(":")[2]
+
+
 def _gebeurtenis(status: str) -> str:
     return {
         ACTIEF: "bevestigd",
@@ -178,9 +194,19 @@ class Motor:
     # Status opslaan ---------------------------------------------------------------------------
 
     def _bewaar_status(
-        self, agent: dict[str, Any], status: str, reden: str, actor: str, **velden: Any
+        self,
+        agent: dict[str, Any],
+        status: str,
+        reden: str,
+        actor: str,
+        *,
+        bewijs: dict[str, Any] | None = None,
+        **velden: Any,
     ) -> dict[str, Any]:
-        """Sla een nieuwe opgeslagen status op (versie omhoog) en log de overgang."""
+        """Sla een nieuwe opgeslagen status op (versie omhoog) en log de overgang.
+
+        `velden` komen in de extensie, `bewijs` alleen in het levenscyclusrecord.
+        """
         nu = self.klok.nu()
         e = ext(agent)
         van = e.get("levenscyclusStatus", "nieuw")
@@ -194,7 +220,9 @@ class Motor:
         agent["active"] = status in INGESCHAKELD
         with self.opslag.transactie():
             opgeslagen = self.opslag.vervang("User", agent["id"], agent, iso(nu))
-            self._log_levenscyclus(opgeslagen, _gebeurtenis(status), actor, reden, van=van)
+            self._log_levenscyclus(
+                opgeslagen, _gebeurtenis(status), actor, reden, van=van, **(bewijs or {})
+            )
         return opgeslagen
 
     def _log_levenscyclus(
@@ -260,7 +288,11 @@ class Motor:
         await self.fga.synchroniseer_subject(subject, "tool", tools)
 
     async def _sync_gelogd(self, agents: list[dict[str, Any]], eigenaren: set[str]) -> None:
-        """Toegang van deze agents en teams van deze eigenaren synchroniseren; fouten gelogd."""
+        """Toegang van deze agents en teams van deze medewerkers synchroniseren; fouten gelogd.
+
+        Een fout komt in het logboek per agent en, als er teams mee moesten, één keer voor de
+        medewerkers: ook een medewerker zonder agents laat zo een spoor na.
+        """
         try:
             for eigenaar in eigenaren:
                 await self._sync_teams_van(eigenaar)
@@ -270,6 +302,17 @@ class Motor:
             log.error("tuples niet gesynchroniseerd: %s", fout)
             for agent in agents:
                 self._log_levenscyclus(agent, "tuples_niet_gesynchroniseerd", "register", str(fout))
+            if eigenaren:
+                self.opslag.log(
+                    {
+                        "soort": "levenscyclus",
+                        "gebeurtenis": "tuples_niet_gesynchroniseerd",
+                        "medewerkers": sorted(eigenaren),
+                        "actor": "register",
+                        "reden": str(fout),
+                    },
+                    self.klok.nu(),
+                )
 
     async def herbouw_alles(self) -> None:
         """Alle register-tuples uit de SCIM-records afleiden (controle, herstel na storeverlies)."""
@@ -279,13 +322,36 @@ class Motor:
         for agent in self.opslag.agents():
             await self._sync_eigenaar(agent)
             await self._sync_toegang(agent)
+        await self._ruim_verweesde_tuples_op()
+
+    async def _ruim_verweesde_tuples_op(self) -> None:
+        """Verwijder register-tuples van een gebruiker of agent die niet meer bestaat.
+
+        De herbouw hierboven loopt alleen over bestaande resources; een opruiming die na een
+        `DELETE` mislukte, komt zo alsnog aan de beurt. Draait onder de proceslock van het
+        register, dus geen SCIM-mutatie loopt ertussen.
+        """
+        # ponytail: één read van de hele store per controle; ruim genoeg voor een register met
+        # duizenden tuples. Daarboven een duurzame verwijderopdracht (outbox) per DELETE.
+        tuples = await self.fga.lees_alles()
+        bestaand = {u["id"] for u in self.opslag.alle("User")}
+        verweesd = {t for t in tuples if (b := bezitter(t)) is not None and b not in bestaand}
+        if verweesd:
+            await self.fga.verwijder(verweesd)
+            log.warning("%d verweesde tuples opgeruimd", len(verweesd))
 
     # Joiner -----------------------------------------------------------------------------------
 
     def registreer_aanmaak(self, agent: dict[str, Any], actor: str) -> dict[str, Any]:
-        """Joiner, in de transactie van de `POST`: status `herbeoordeling_vereist`."""
+        """Joiner, in de transactie van de `POST`: status `herbeoordeling_vereist`.
+
+        Een expliciete `active=false` is de noodstop vanaf het begin: de eigenaar kan zo'n agent
+        niet activeren; eerst moet de beheerder hem inschakelen.
+        """
         if parse_tijd(ext(agent)["vervaldatum"]) <= self.klok.nu():
             raise ScimFout(400, "vervaldatum moet in de toekomst liggen", "invalidValue")
+        if agent["active"] is False:
+            return self._bewaar_status(agent, GEDEACTIVEERD, NOODSTOP, actor)
         return self._bewaar_status(agent, HERBEOORDELING, "wacht_op_eigenaar", actor)
 
     async def sync_na_aanmaak(self, agent: dict[str, Any]) -> None:
@@ -344,10 +410,19 @@ class Motor:
             ACTIEF,
             "bevestigd_door_eigenaar",
             "eigenaar",
+            bewijs={"bevestigdeVersie": versie, "configuratie": self._configuratie(e)},
             laatsteBevestiging=iso(nu),
             bevestigdeVersie=versie,
             volgendeHerbeoordeling=iso(nu + termijn),
         )
+
+    def _configuratie(self, e: dict[str, Any]) -> dict[str, Any]:
+        """Wat de eigenaar bevestigt, met de standaardtermijnen ingevuld; voor het logboek."""
+        standaard = {
+            "herbeoordelingTermijn": self.instellingen.standaard_herbeoordeling,
+            "bevestigingstermijn": self.instellingen.standaard_bevestigingstermijn,
+        }
+        return {k: e.get(k, standaard.get(k)) for k in AGENT_CONFIGURATIE}
 
     # Mover ------------------------------------------------------------------------------------
 
@@ -357,19 +432,23 @@ class Motor:
         """Mover, in de transactie van de groepsmutatie.
 
         Returns:
-            De eigenaren wier lidmaatschap feitelijk veranderde en hun geblokkeerde agents.
+            De eigenaren wier lidmaatschap feitelijk veranderde en hun agents waarvan de status
+            veranderde: geblokkeerd door deze wijziging of door een al ingetreden tijdregel.
         """
         oude_leden = leden_van(oud) if oud else set()
         nieuwe_leden = leden_van(nieuw) if nieuw else set()
         gewijzigd = oude_leden ^ nieuwe_leden
         reden = "eigenaar_van_team_gewisseld"
         getroffen = []
-        for agent in self._agents_van(gewijzigd):
-            status = ext(agent).get("levenscyclusStatus")
+        for actueel, veranderd in map(self._actueel, self._agents_van(gewijzigd)):
+            status = ext(actueel).get("levenscyclusStatus")
             if status == ACTIEF:
-                getroffen.append(self._bewaar_status(agent, HERBEOORDELING, reden, "bron"))
-            elif status == HERBEOORDELING:
-                self._verhoog_versie(agent, reden, "bron")
+                getroffen.append(self._bewaar_status(actueel, HERBEOORDELING, reden, "bron"))
+                continue
+            if status == HERBEOORDELING:
+                self._verhoog_versie(actueel, reden, "bron")
+            if veranderd:
+                getroffen.append(actueel)
         return gewijzigd, getroffen
 
     def _verhoog_versie(self, agent: dict[str, Any], reden: str, actor: str) -> None:
@@ -394,16 +473,24 @@ class Motor:
     def blokkeer_na_gebruikerswijziging(
         self, oud: dict[str, Any], nieuw: dict[str, Any] | None
     ) -> list[dict[str, Any]]:
-        """Leaver, in de transactie van de gebruikersmutatie: agents van de eigenaar uit."""
+        """Leaver, in de transactie van de gebruikersmutatie: agents van de eigenaar uit.
+
+        Returns:
+            De agents waarvan de status veranderde, ook door een al ingetreden tijdregel.
+        """
         was_actief = oud.get("active", True)
         is_nu_actief = nieuw is not None and nieuw.get("active", True)
         if not was_actief or is_nu_actief:
             return []
-        return [
-            self._bewaar_status(agent, GEDEACTIVEERD, "eigenaar_vertrokken", "bron")
-            for agent in self._agents_van({oud["id"]})
-            if ext(agent).get("levenscyclusStatus") in INGESCHAKELD and not is_noodstop(agent)
-        ]
+        getroffen = []
+        for actueel, veranderd in map(self._actueel, self._agents_van({oud["id"]})):
+            if ext(actueel).get("levenscyclusStatus") in INGESCHAKELD and not is_noodstop(actueel):
+                getroffen.append(
+                    self._bewaar_status(actueel, GEDEACTIVEERD, "eigenaar_vertrokken", "bron")
+                )
+            elif veranderd:
+                getroffen.append(actueel)
+        return getroffen
 
     async def sync_na_gebruikerswijziging(
         self, gebruiker_id: str, getroffen: list[dict[str, Any]]
@@ -423,6 +510,7 @@ class Motor:
         van de beheerder (None als hij `active` niet zet); hij wordt nooit afgeleid uit een
         verschil tussen opgeslagen en effectieve toestand.
         """
+        oud, _ = self._actueel(oud)
         oe, ne = ext(oud), ext(nieuw)
         for sleutel in STATUSVELDEN:
             if sleutel in oe:
@@ -485,18 +573,36 @@ class Motor:
             await self.fga.synchroniseer_subject(subject, "tool", set())
             await self.fga.verwijder_alles(subject)
         except FgaFout as fout:
+            # De eerstvolgende controle ruimt ze alsnog op (`_ruim_verweesde_tuples_op`).
             log.error("tuples van verwijderde agent niet opgeruimd: %s", fout)
+            self._log_levenscyclus(agent, "tuples_niet_gesynchroniseerd", "register", str(fout))
 
     # Controle en toelating --------------------------------------------------------------------
 
-    def _maak_persistent(self, agent: dict[str, Any]) -> Overgang | None:
+    def _actueel(self, agent: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """De agent met een al ingetreden tijdregel opgeslagen, vóór een gebeurtenis erop inwerkt.
+
+        Zo bouwt een groepswijziging, leaver of beheerderswijziging voort op de effectieve status:
+        een agent die al is verlopen of gedeactiveerd, komt niet terug in `herbeoordeling_vereist`,
+        en de uitkomst hangt niet af van of de controle al heeft gedraaid.
+
+        Returns:
+            De opgeslagen agent en of zijn status hierdoor veranderde; dan moeten ook zijn
+            toegangstuples mee.
+        """
+        opgeslagen, overgang = self._maak_persistent(agent, "register")
+        return opgeslagen, overgang is not None
+
+    def _maak_persistent(
+        self, agent: dict[str, Any], actor: str = "controle"
+    ) -> tuple[dict[str, Any], Overgang | None]:
         eff = ext(self.effectief(agent))
         e = ext(agent)
         if (eff["levenscyclusStatus"], eff["statusReden"]) == (
             e.get("levenscyclusStatus"),
             e.get("statusReden"),
         ):
-            return None
+            return agent, None
         van = str(e.get("levenscyclusStatus"))
         for sleutel in ("levenscyclusStatus", "statusReden", "statusSinds"):
             e[sleutel] = eff[sleutel]
@@ -510,11 +616,11 @@ class Motor:
             self._log_levenscyclus(
                 opgeslagen,
                 _gebeurtenis(eff["levenscyclusStatus"]),
-                "controle",
+                actor,
                 eff["statusReden"],
                 van=van,
             )
-        return Overgang(
+        return opgeslagen, Overgang(
             agent["id"],
             agent["userName"],
             van,
@@ -525,7 +631,7 @@ class Motor:
 
     def maak_persistent(self) -> list[Overgang]:
         """Maak de effectieve status van elke agent persistent en log elke overgang."""
-        overgangen = [self._maak_persistent(agent) for agent in self.opslag.agents()]
+        overgangen = [self._maak_persistent(agent)[1] for agent in self.opslag.agents()]
         return [o for o in overgangen if o is not None]
 
     async def controle(self) -> list[Overgang]:
@@ -538,15 +644,15 @@ class Motor:
         """Definitieve toelating onder het mutatieslot (ONTWERP §4.4 stap 5).
 
         Returns:
-            None als de toelating standhoudt, anders de reden (`toestand_gewijzigd`).
+            None als de toelating standhoudt, anders de toelichting bij `toestand_gewijzigd`.
         """
         agent = self.opslag.haal("User", str(record.get("agent", "")))
         if agent is None or not is_agent(agent):
-            return "toestand_gewijzigd: agent bestaat niet meer"
+            return "agent bestaat niet meer"
         if agent["meta"]["version"] != record.get("recordversie"):
-            return "toestand_gewijzigd: recordversie verouderd"
+            return "recordversie verouderd"
         if ext(self.effectief(agent))["levenscyclusStatus"] != ACTIEF:
-            return "toestand_gewijzigd: agent is niet meer actief"
+            return "agent is niet meer actief"
         return None
 
     async def relatiecheck(self, agent: dict[str, Any], relatie: str, dossier: str) -> bool:

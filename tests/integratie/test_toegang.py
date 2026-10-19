@@ -56,7 +56,7 @@ def test_tool_niet_toegestaan(keten: Keten) -> None:
         "levenscyclus": "ok",
         "tool": "geweigerd",
         "relatie": "niet_uitgevoerd",
-        "logboek": "niet_uitgevoerd",
+        "logboek": "ok",
     }
     assert not any(n["agent"] == agent.id for n in keten.notities(INKOMEN_DOSSIER))
 

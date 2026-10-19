@@ -7,7 +7,10 @@ het SCIM-record van `sub`; headerverwijzingen (`jku`, `x5u`, `x5c`, `kid`) worde
 
 from __future__ import annotations
 
+import base64
 import json
+import math
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -22,6 +25,8 @@ from jwt.algorithms import ECAlgorithm
 ALG = "ES256"
 MAX_GELDIGHEID = 60
 JTI_MIN, JTI_MAX = 16, 128
+# Een P-256-coördinaat is 32 bytes (RFC 7518 §6.2.1.2), base64url zonder padding: 43 tekens.
+_COORDINAAT = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
 class AssertieFout(Exception):
@@ -88,14 +93,20 @@ class Sleutelpaar:
 
 
 def controleer_jwk(tekst: str) -> dict[str, Any]:
-    """Controleer dat een `publiekeSleutel` een publieke P-256-JWK is.
+    """Controleer dat een `publiekeSleutel` een bruikbare publieke P-256-JWK is.
+
+    De sleutel wordt echt opgebouwd (RFC 7518 §6.2.1): `x` en `y` moeten canonieke
+    base64url-strings zonder padding van 32 bytes zijn (RFC 7515 §2) en samen een punt op de
+    kromme vormen. De decoder van PyJWT slaat tekens buiten het alfabet en padding stil over;
+    daarom wordt de vorm vooraf exact gecontroleerd. `alg` en `use` zijn optioneel, maar als ze
+    er staan moeten ze `ES256` en `sig` zijn.
 
     Returns:
         De JWK als dict.
 
     Raises:
-        ValueError: Bij ongeldige JSON, een ander sleuteltype, een andere kromme of een
-            privé-onderdeel.
+        ValueError: Bij ongeldige JSON, een ander sleuteltype, een andere kromme, een
+            privé-onderdeel, onbruikbare coördinaten of tegenstrijdige metadata.
     """
     try:
         jwk = json.loads(tekst)
@@ -105,9 +116,27 @@ def controleer_jwk(tekst: str) -> dict[str, Any]:
         raise ValueError("publiekeSleutel moet een JWK zijn met kty EC en crv P-256")
     if "d" in jwk:
         raise ValueError("publiekeSleutel bevat een privé-onderdeel (d)")
-    if not jwk.get("x") or not jwk.get("y"):
-        raise ValueError("publiekeSleutel mist x of y")
+    if not all(_is_coordinaat(jwk.get(c)) for c in ("x", "y")):
+        raise ValueError(
+            "publiekeSleutel: x en y moeten base64url-strings zonder padding van 32 bytes zijn"
+        )
+    if jwk.get("alg", ALG) != ALG or jwk.get("use", "sig") != "sig":
+        raise ValueError(f"publiekeSleutel is alleen bruikbaar met alg {ALG} en use sig")
+    try:
+        sleutel = ECAlgorithm.from_jwk(jwk)
+    except (jwt.InvalidKeyError, ValueError) as fout:
+        raise ValueError(f"publiekeSleutel is geen geldige P-256-sleutel: {fout}") from fout
+    if not isinstance(sleutel, EllipticCurvePublicKey):
+        raise ValueError("publiekeSleutel is geen publieke sleutel")
     return jwk
+
+
+def _is_coordinaat(waarde: Any) -> bool:
+    """Of een waarde de enige base64url-vorm zonder padding van 32 bytes is."""
+    if not isinstance(waarde, str) or not _COORDINAAT.fullmatch(waarde):
+        return False
+    terug = base64.urlsafe_b64encode(base64.urlsafe_b64decode(waarde + "="))
+    return terug.rstrip(b"=").decode() == waarde
 
 
 def sub_uit_assertie(token: str) -> str:
@@ -135,15 +164,35 @@ def _controleer_header(header: dict[str, Any]) -> None:
         raise AssertieFout("assertie_ongeldig", "typ moet JWT zijn")
 
 
+def _tijdstip(claims: dict[str, Any], naam: str) -> float:
+    """Een `NumericDate` (RFC 7519 §2): een eindig JSON-getal.
+
+    PyJWT laat bij `iat` en `exp` ook een numerieke string of een boolean door; daarmee rekenen
+    zou een `TypeError` geven in plaats van een gelogde weigering. Een geheel getal buiten het
+    bereik van een float (`10**400`) geeft bij omzetten een `OverflowError` en telt als oneindig.
+    """
+    waarde = claims[naam]
+    if isinstance(waarde, bool) or not isinstance(waarde, int | float):
+        raise AssertieFout("assertie_ongeldig", f"{naam} moet een getal zijn (NumericDate)")
+    try:
+        tijd = float(waarde)
+    except OverflowError:
+        tijd = math.inf
+    if not math.isfinite(tijd):
+        raise AssertieFout("assertie_ongeldig", f"{naam} moet een eindig getal zijn (NumericDate)")
+    return tijd
+
+
 def _controleer_claims(claims: dict[str, Any], aud: str, max_skew: int) -> None:
     # PyJWT accepteert ook een lijst die `aud` bevat; het profiel eist precies één URL.
     if not isinstance(claims["aud"], str) or claims["aud"] != aud:
         raise AssertieFout("assertie_ongeldig", "aud moet precies de URL van de poort zijn")
     if claims["iss"] != claims["sub"]:
         raise AssertieFout("assertie_ongeldig", "iss en sub verschillen")
-    if claims["iat"] > time.time() + max_skew:
+    iat, exp = _tijdstip(claims, "iat"), _tijdstip(claims, "exp")
+    if iat > time.time() + max_skew:
         raise AssertieFout("assertie_ongeldig", "iat ligt in de toekomst")
-    duur = claims["exp"] - claims["iat"]
+    duur = exp - iat
     if not 0 < duur <= MAX_GELDIGHEID:
         raise AssertieFout(
             "assertie_ongeldig", f"exp - iat moet tussen 1 en {MAX_GELDIGHEID} s zijn"

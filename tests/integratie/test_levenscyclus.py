@@ -6,6 +6,7 @@ Tijdsprongen zijn klein (uren), zodat ze de agents van andere tests niet over hu
 from __future__ import annotations
 
 import os
+import uuid
 
 import httpx2
 import pytest
@@ -16,6 +17,7 @@ from levenscyclus.assertie import Sleutelpaar
 from levenscyclus.beheer import lees_token
 from levenscyclus.fga import Fga, FgaIds, Tuple
 from levenscyclus.klok import parse_tijd
+from levenscyclus.poort.gegevens import TEAM_INKOMEN
 from levenscyclus.register.scim import URN_AGENT
 from tests.integratie.conftest import INST, Keten, ProefAgent
 
@@ -119,6 +121,26 @@ def test_openfga_weigert_verlopen_los_van_poort(keten: Keten) -> None:
     keten.klok("PT2H")
     # Geen controle gedraaid: het tuple gebruiker#agent bestaat nog, de conditie weigert.
     assert keten.beheer.relatiecheck(agent.id, DOSSIER)["allowed"] is False
+
+
+async def test_controle_ruimt_verweesde_register_tuples_op(keten: Keten) -> None:
+    # Tuples van een agent en een medewerker die niet in het register staan, zoals na een DELETE
+    # waarvan de opruiming mislukte. De dossierrelaties van de poort blijven staan.
+    fga = _fga(keten)
+    agent, mens = f"agent:{uuid.uuid4()}", f"gebruiker:{uuid.uuid4()}"
+    team = f"team:{keten.teams[TEAM_INKOMEN]}"
+    await fga.synchroniseer_subject(
+        agent, "tool", {Tuple(agent, "toegestaan", "tool:dossier_lezen")}
+    )
+    await fga.synchroniseer_subject(mens, "team", {Tuple(mens, "lid", team)})
+    await fga.synchroniseer(agent, "eigenaar", {Tuple(mens, "eigenaar", agent)})
+    dossiers = await fga.lees(f"dossier:{DOSSIER}", "team")
+    assert dossiers
+    keten.beheer.controle()
+    assert await fga.lees_per_subject(agent, "tool") == set()
+    assert await fga.lees_per_subject(mens, "team") == set()
+    assert await fga.lees(agent) == set()
+    assert await fga.lees(f"dossier:{DOSSIER}", "team") == dossiers
 
 
 def test_niet_herbeoordeeld_wordt_gedeactiveerd(keten: Keten) -> None:

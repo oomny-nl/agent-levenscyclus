@@ -65,6 +65,7 @@ class Opslag:
         self.basis_url = basis_url
         self.geblokkeerd: str | None = None
         self._wachtrij: list[tuple[int, str]] = []
+        self._in_transactie = False  # alleen `transactie()` opent en sluit transacties
         laatste_anker = lees_anker(anker) if anker is not None else None
         # Kop van de keten volgens het anker: het laatste record dat dit register zelf verankerde.
         self._kop: tuple[int, str] | None = laatste_anker[-1] if laatste_anker else None
@@ -74,20 +75,47 @@ class Opslag:
         """Eén SQLite-transactie; genest hergebruikt de buitenste.
 
         Logrecords binnen de transactie worden pas na de commit verankerd; de aanroeper krijgt
-        pas succes als commit én ankerwrite zijn geslaagd (ONTWERP §4.6).
+        pas succes als commit én ankerwrite zijn geslaagd (ONTWERP §4.6). Een fout, ook een
+        mislukte commit, rolt de transactie terug en laat haar logrecords vallen.
         """
-        if self._db.in_transaction:
+        if self._in_transactie:
             yield
             return
+        self._eis_geen_open_transactie()
         self._db.execute("BEGIN IMMEDIATE")
+        self._in_transactie = True
         try:
             yield
-        except BaseException:
-            self._db.execute("ROLLBACK")
-            self._wachtrij.clear()
+            self._db.execute("COMMIT")
+        except BaseException as fout:
+            self._rol_terug(fout)
             raise
-        self._db.execute("COMMIT")
+        finally:
+            self._in_transactie = False
         self._veranker_wachtrij()
+
+    def _rol_terug(self, fout: BaseException) -> None:
+        """Rol een open transactie terug; lukt dat niet, dan blokkeert het logboek."""
+        self._wachtrij.clear()
+        if not self._db.in_transaction:
+            return
+        try:
+            self._db.execute("ROLLBACK")
+        except sqlite3.Error as rollbackfout:
+            self.geblokkeerd = f"rollback na {type(fout).__name__} mislukt: {rollbackfout}"
+            fout.add_note(f"{self.geblokkeerd}; het register weigert verdere appends tot herstart")
+
+    def _eis_geen_open_transactie(self) -> None:
+        """Weiger te schrijven op een verbinding die nog in een niet afgesloten transactie staat.
+
+        Anders zou een volgende wijziging of logrecord in die transactie belanden: niet
+        gecommit en niet verankerd, terwijl de aanroeper succes krijgt.
+        """
+        if self._db.in_transaction:
+            self.geblokkeerd = self.geblokkeerd or "databaseverbinding staat nog in een transactie"
+            raise LogboekFout(
+                f"{self.geblokkeerd}; het register weigert verdere appends tot herstart"
+            )
 
     # Resources --------------------------------------------------------------------------------
 
@@ -215,9 +243,15 @@ class Opslag:
 
         Raises:
             LogboekFout: In de blokkeerstand, of als de ankerwrite mislukt (zet de blokkeerstand).
+            ValueError: Als het record een veld bevat dat het logboek zelf zet.
         """
+        gereserveerd = sorted({"tijd", "nr", "vorige", "hash"} & set(record))
+        if gereserveerd:
+            raise ValueError(f"het logboek zet {gereserveerd} zelf; laat ze weg uit het record")
         if self.geblokkeerd:
-            raise LogboekFout(f"logboek geblokkeerd na ankerfout: {self.geblokkeerd}")
+            raise LogboekFout(f"logboek geblokkeerd: {self.geblokkeerd}")
+        if not self._in_transactie:
+            self._eis_geen_open_transactie()
         record = {"tijd": iso(tijd), **record}
         laatste = self._db.execute(
             "SELECT nr, hash FROM logboek ORDER BY nr DESC LIMIT 1"
@@ -231,7 +265,7 @@ class Opslag:
         )
         nr = int(cursor.lastrowid or 0)
         self._wachtrij.append((nr, h))
-        if not self._db.in_transaction:
+        if not self._in_transactie:
             self._veranker_wachtrij()
         return {"nr": nr, **record, "vorige": vorige, "hash": h}
 

@@ -4,16 +4,17 @@
 
 An AI agent is an identity with an owner and an expiry date. This repository shows that an agent
 can get the same lifecycle care as an employee: it is provisioned with a human owner, a purpose, an
-expiry date and a risk class. It exists only as long as its owner confirms it, follows its owner
-when they change jobs and disappears with its owner when they leave. Everything it does and
-everything that happens to it is recorded in one verifiable log.
+expiry date and a risk class. It exists only as long as its owner confirms it and follows its
+owner when they change jobs. When the owner leaves, the agent is deactivated and loses its access;
+its registration and audit trail are kept. Everything it does and everything that happens to it
+is recorded in one verifiable log.
 
 The scenario takes place in the fictional municipality of Lindevoort. All names, case files and
 content are made up. The code, logs and identifiers are in Dutch.
 
 ![Demo recording: joiner, prompt injection refused, mover, leaver and expired agent, with the chained log as evidence](docs/beeld/demo.gif)
 
-The recording shows `make demo`: five scenarios against the real stack, followed by the log as evidence. Record it again with `make opname` (requires [VHS](https://github.com/charmbracelet/vhs) and ffmpeg).
+The recording shows `make speel` on a running stack (`make demo` runs `make up` and `make speel` in one go): five scenarios against the real stack, followed by the log as evidence. Record it again with `make opname` (requires [VHS](https://github.com/charmbracelet/vhs) and ffmpeg).
 
 ## What this proves
 
@@ -37,20 +38,20 @@ The recording shows `make demo`: five scenarios against the real stack, followed
 
 ```mermaid
 flowchart LR
-    HR["HR / IdP<br/>SCIM-client (bron)"] -->|Users, Groups| R
-    FB["Functioneel beheerder<br/>CLI"] -->|agents, controle, overzicht| R
-    E["Eigenaar<br/>Sanne, Kees"] -->|bevestiging| R
-    R["register<br/>SCIM 2.0 + levenscyclusmotor + logboek"]
-    P["poort<br/>MCP-gateway + dossier-API"]
-    A["Agent<br/>LangGraph + MCP-client<br/>eigen sleutel"] -->|"tools/call + agent-assertie"| P
+    HR["HR / IdP<br/>SCIM client (source)"] -->|Users, Groups| R
+    FB["Application administrator<br/>CLI"] -->|agents, review run, overview| R
+    E["Owner<br/>Sanne, Kees"] -->|confirmation| R
+    R["register<br/>SCIM 2.0 + lifecycle engine + log"]
+    P["poort (gateway)<br/>MCP gateway + case file API"]
+    A["Agent<br/>LangGraph + MCP client<br/>own key"] -->|"tools/call + agent assertion"| P
     P -->|GET /scim/v2/Users/id| R
     P -->|POST /logboek| R
-    subgraph intern["netwerk intern: alleen register en poort"]
+    subgraph intern["network intern"]
         F[("OpenFGA")]
     end
-    R -->|relatietuples, preshared key| F
+    R -->|relationship tuples, preshared key| F
     P -->|check, preshared key| F
-    R -.->|ankerbestand| K[("apart volume")]
+    R -.->|anchor file| K[("separate volume")]
 ```
 
 | Component | Role |
@@ -75,7 +76,7 @@ make demo
 `make demo` creates a `.env` with a fresh OpenFGA key (never in git), starts the stack from scratch
 and plays the five scenarios. It then shows the evidence table from the log, the chain and anchor
 check, and a tampering test. The command exits with code 0 when every outcome matches the design;
-CI runs it on every push.
+CI runs it on every pull request and every push to `main`.
 
 ## The scenarios
 

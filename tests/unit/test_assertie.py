@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import secrets
 import time
+from collections.abc import Callable
 from typing import Any
 
 import jwt
@@ -15,6 +17,7 @@ from levenscyclus.assertie import (
     ALG,
     AssertieFout,
     Sleutelpaar,
+    controleer_jwk,
     sub_uit_assertie,
     verifieer_assertie,
 )
@@ -133,3 +136,98 @@ def test_aud_als_lijst_geweigerd(paar: Sleutelpaar) -> None:
     # PyJWT accepteert een lijst die de audience bevat; het profiel eist één exacte URL.
     assert _code(_token(paar, aud=[AUD, "http://elders.test"]), paar) == "assertie_ongeldig"
     assert _code(_token(paar, aud=[AUD]), paar) == "assertie_ongeldig"
+
+
+@pytest.mark.parametrize(
+    ("naam", "waarde"),
+    [
+        ("iat", lambda nu: f"{nu}"),
+        ("exp", lambda nu: f"{nu + 30}"),
+        ("iat", lambda _: True),
+        ("exp", lambda _: math.inf),
+        ("iat", lambda _: math.nan),
+        ("exp", lambda _: 10**400),
+        ("iat", lambda _: -(10**400)),
+    ],
+    ids=[
+        "iat-string",
+        "exp-string",
+        "iat-bool",
+        "exp-oneindig",
+        "iat-nan",
+        "exp-groot",
+        "iat-klein",
+    ],
+)
+def test_tijdclaims_moeten_getallen_zijn(
+    paar: Sleutelpaar, naam: str, waarde: Callable[[int], Any]
+) -> None:
+    # RFC 7519 §2 NumericDate; PyJWT laat een numerieke string door, het profiel niet.
+    token = _token(paar, **{naam: waarde(int(time.time()))})
+    assert _code(token, paar) == "assertie_ongeldig"
+
+
+def _b64url(gegevens: bytes) -> str:
+    return base64.urlsafe_b64encode(gegevens).rstrip(b"=").decode()
+
+
+@pytest.mark.parametrize(
+    ("afwijking", "melding"),
+    [
+        ({"x": 1, "y": 2}, "base64url"),
+        ({"x": "!!!", "y": "???"}, "base64url"),
+        ({"x": _b64url(b"\x01" * 16)}, "base64url"),
+        ({"x": _b64url(b"\x01" * 33)}, "base64url"),
+        ({"y": _b64url(b"\x01" * 32)}, "geen geldige P-256"),
+        ({"alg": "RS256"}, "alg ES256"),
+        ({"use": "enc"}, "use sig"),
+        ({"d": _b64url(b"\x01" * 32)}, "privé"),
+    ],
+    ids=[
+        "numeriek",
+        "geen-base64url",
+        "te-kort",
+        "te-lang",
+        "niet-op-de-kromme",
+        "alg",
+        "use",
+        "privé",
+    ],
+)
+def test_onbruikbare_jwk_geweigerd(
+    paar: Sleutelpaar, afwijking: dict[str, Any], melding: str
+) -> None:
+    jwk = {**json.loads(paar.publieke_jwk()), **afwijking}
+    with pytest.raises(ValueError, match=melding):
+        controleer_jwk(json.dumps(jwk))
+
+
+_ALFABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+@pytest.mark.parametrize(
+    "vervalsing",
+    [
+        lambda x: "é" + x,
+        lambda x: x + "=",
+        lambda x: x[:20] + "\n" + x[20:],
+        lambda x: x.replace("-", "+").replace("_", "/"),
+        lambda x: x[:-1] + _ALFABET[_ALFABET.index(x[-1]) ^ 1],
+    ],
+    ids=["niet-ascii", "padding", "regeleinde", "standaard-base64", "niet-canoniek"],
+)
+def test_jwk_coordinaat_alleen_in_canonieke_base64url(
+    paar: Sleutelpaar, vervalsing: Callable[[str], str]
+) -> None:
+    # PyJWT decodeert al deze varianten naar dezelfde 32 bytes; het profiel kent één vorm.
+    jwk = json.loads(paar.publieke_jwk())
+    if vervalsing(jwk["x"]) == jwk["x"]:
+        jwk["x"] = _b64url(b"\xfb" * 32)  # bevat zeker '-' of '_', zodat de variant verschilt
+    jwk["x"] = vervalsing(jwk["x"])
+    with pytest.raises(ValueError, match="base64url"):
+        controleer_jwk(json.dumps(jwk))
+
+
+def test_jwk_zonder_alg_en_use_is_bruikbaar(paar: Sleutelpaar) -> None:
+    jwk = {k: v for k, v in json.loads(paar.publieke_jwk()).items() if k not in ("alg", "use")}
+    assert controleer_jwk(json.dumps(jwk)) == jwk

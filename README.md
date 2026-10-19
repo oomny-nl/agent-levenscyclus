@@ -5,8 +5,9 @@
 Een AI-agent is een identiteit met een eigenaar en een houdbaarheidsdatum. Deze repo laat zien dat
 je een agent dezelfde levenscycluszorg kunt geven als een medewerker: hij wordt geprovisioneerd met
 een menselijke eigenaar, een doel, een vervaldatum en een risicoklasse. Hij bestaat alleen zolang
-zijn eigenaar hem bevestigt, volgt zijn eigenaar bij een functiewissel en verdwijnt met zijn
-eigenaar bij vertrek. Alles wat hij doet en alles wat met hem gebeurt, staat in één controleerbaar
+zijn eigenaar hem bevestigt en volgt zijn eigenaar bij een functiewissel. Vertrekt de eigenaar,
+dan wordt de agent gedeactiveerd en verliest hij zijn toegang; zijn registratie en het auditspoor
+blijven bewaard. Alles wat hij doet en alles wat met hem gebeurt, staat in één controleerbaar
 logboek.
 
 Het scenario speelt bij de fictieve gemeente Lindevoort. Alle namen, dossiers en inhoud zijn
@@ -14,7 +15,7 @@ verzonnen.
 
 ![Demo-opname: joiner, prompt-injectie geweigerd, mover, leaver en verlopen agent, met het geketende logboek als bewijs](docs/beeld/demo.gif)
 
-De opname toont `make demo`: vijf scenario's tegen de echte keten en daarna het logboek als bewijs. Opnieuw opnemen: `make opname` (vereist [VHS](https://github.com/charmbracelet/vhs) en ffmpeg).
+De opname toont `make speel` op een gestarte keten (`make demo` doet `make up` en `make speel` in één keer): vijf scenario's tegen de echte keten en daarna het logboek als bewijs. Opnieuw opnemen: `make opname` (vereist [VHS](https://github.com/charmbracelet/vhs) en ffmpeg).
 
 ## Wat dit bewijst
 
@@ -46,7 +47,7 @@ flowchart LR
     A["Agent<br/>LangGraph + MCP-client<br/>eigen sleutel"] -->|"tools/call + agent-assertie"| P
     P -->|GET /scim/v2/Users/id| R
     P -->|POST /logboek| R
-    subgraph intern["netwerk intern: alleen register en poort"]
+    subgraph intern["netwerk intern"]
         F[("OpenFGA")]
     end
     R -->|relatietuples, preshared key| F
@@ -76,7 +77,7 @@ make demo
 `make demo` maakt een `.env` met een verse OpenFGA-sleutel (nooit in git), start de keten schoon en
 speelt de vijf scenario's af. Daarna volgen de bewijstabel uit het logboek, de controle van keten en
 anker, en een manipulatieproef. Het commando eindigt met exitcode 0 als elke uitkomst overeenkomt
-met het ontwerp; CI draait het bij elke push.
+met het ontwerp; CI draait het bij elke pull request en elke push naar `main`.
 
 ## De scenario's
 

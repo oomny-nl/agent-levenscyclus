@@ -74,9 +74,9 @@ def test_rolwissel_via_usertype_geweigerd(keten: Keten) -> None:
     naam_mens = keten.bron.haal("Users", mens)["userName"]
     als_agent = {**keten.record(agent), "userName": naam_mens}
     als_agent.pop("id")
-    assert _status(lambda: keten.bron.vervang("Users", mens, als_agent)) == 403
+    assert _status(lambda: keten.bron.vervang("Users", mens, als_agent)) == 400
     als_mens = {"userName": agent.naam, "userType": "medewerker"}
-    assert _status(lambda: keten.beheerder.vervang("Users", agent.id, als_mens)) == 403
+    assert _status(lambda: keten.beheerder.vervang("Users", agent.id, als_mens)) == 400
     assert _scimrecords(keten, naam_mens)[-1]["uitkomst"] == "geweigerd_rolwissel"
     assert _scimrecords(keten, agent.naam)[-1]["uitkomst"] == "geweigerd_rolwissel"
     assert keten.ext(agent)["levenscyclusStatus"] == "herbeoordeling_vereist"

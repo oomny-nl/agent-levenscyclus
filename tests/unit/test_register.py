@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+
 from levenscyclus.fga import Tuple
 from levenscyclus.klok import iso, parse_tijd
 from levenscyclus.register.motor import effectief
-from levenscyclus.register.scim import URN_AGENT
+from levenscyclus.register.scim import AGENT_CONFIGURATIE, URN_AGENT
 from tests.unit.conftest import Register
 
 
@@ -27,6 +29,24 @@ def _ext(record: dict[str, object]) -> dict[str, object]:
     return waarde
 
 
+async def test_bevestiging_na_gemiste_sync_vervangt_de_vervaldatum(register: Register) -> None:
+    # De verlenging viel samen met een OpenFGA-storing: de oude `gebruiker#agent`-tuple bleef
+    # staan. De bevestiging vervangt hem door die met de nieuwe vervaldatum.
+    _, _, agent = await _actieve_agent(register)
+    register.fga.faal = True
+    nieuw = iso(register.dienst.klok.nu() + timedelta(days=60))
+    verleng = [{"op": "replace", "path": f"{URN_AGENT}:vervaldatum", "value": nieuw}]
+    assert (
+        await register.patch(f"/scim/v2/Users/{agent}", "beheerder", verleng)
+    ).status_code == 200
+    register.fga.faal = False
+    assert (await register.bevestig(agent)).status_code == 200
+    [toegang] = [
+        t for t in register.fga.tuples if t.user == f"agent:{agent}" and t.relation == "agent"
+    ]
+    assert toegang.vervaldatum == register.opgeslagen(agent)["vervaldatum"]
+
+
 async def test_bevestiging_zonder_sync_activeert_niet(register: Register) -> None:
     eigenaar = await register.mens("sanne")
     await register.team("werk", eigenaar)
@@ -38,6 +58,47 @@ async def test_bevestiging_zonder_sync_activeert_niet(register: Register) -> Non
     assert "tuples_niet_gesynchroniseerd" in register.gebeurtenissen(agent)
     register.fga.faal = False
     assert not any(t.user == f"agent:{agent}" for t in register.fga.tuples)
+
+
+async def test_controle_ruimt_tuples_van_verwijderde_agent_en_medewerker_op(
+    register: Register,
+) -> None:
+    eigenaar, team, agent = await _actieve_agent(register)
+    collega = await register.mens("collega")
+    await register.team("tweede", collega)
+    dossier = Tuple(f"team:{team}", "team", "dossier:2026-0142")  # van de poort
+    register.fga.tuples.add(dossier)
+    register.fga.faal = True
+    assert (
+        await register.verzoek("DELETE", f"/scim/v2/Users/{agent}", "beheerder")
+    ).status_code == 204
+    assert (
+        await register.verzoek("DELETE", f"/scim/v2/Users/{collega}", "bron")
+    ).status_code == 204
+    register.fga.faal = False
+
+    def van(id_: str) -> set[Tuple]:
+        return {
+            t
+            for t in register.fga.tuples
+            if id_ in (t.user.partition(":")[2], t.object.partition(":")[2])
+        }
+
+    # De opruiming na de DELETE mislukte; de herbouw per bestaande resource ziet ze niet meer.
+    assert len(van(agent)) == 3
+    assert len(van(collega)) == 1
+    assert register.gebeurtenissen(agent)[-1] == "tuples_niet_gesynchroniseerd"
+    # De collega had geen agents; ook zijn mislukte opruiming staat in het logboek.
+    assert [
+        r["medewerkers"]
+        for r in register.dienst.opslag.logboek()
+        if r.get("gebeurtenis") == "tuples_niet_gesynchroniseerd" and "medewerkers" in r
+    ] == [[collega]]
+    await register.ok("POST", "/beheer/controle", "beheerder")
+    assert not van(agent)
+    assert not van(collega)
+    assert dossier in register.fga.tuples
+    assert Tuple(f"gebruiker:{eigenaar}", "lid", f"team:{team}") in register.fga.tuples
 
 
 async def test_mover_blokkeert_ook_zonder_openfga(register: Register) -> None:
@@ -171,6 +232,61 @@ async def test_noodstop_dominant(register: Register) -> None:
     assert eigenaar != nieuwe_eigenaar
 
 
+async def test_bevestiging_is_herleidbaar_na_een_latere_wijziging(register: Register) -> None:
+    eigenaar = await register.mens("sanne")
+    agent = await register.agent(eigenaar, toegestaneTools=["dossier_lezen", "notitie_toevoegen"])
+    gelezen = await register.record(agent)
+    assert (await register.bevestig(agent)).status_code == 200
+    antwoord = await register.patch(
+        f"/scim/v2/Users/{agent}",
+        "beheerder",
+        [
+            {"op": "replace", "path": f"{URN_AGENT}:doel", "value": "dossiers wijzigen"},
+            {"op": "replace", "path": f"{URN_AGENT}:toegestaneTools", "value": ["dossier_lezen"]},
+        ],
+    )
+    assert antwoord.status_code == 200
+    assert register.opgeslagen(agent)["doel"] == "dossiers wijzigen"
+
+    [bevestigd] = [
+        r
+        for r in register.dienst.opslag.logboek()
+        if r.get("agent") == agent and r.get("gebeurtenis") == "bevestigd"
+    ]
+    e, inst = _ext(gelezen), register.dienst.inst
+    assert bevestigd["bevestigdeVersie"] == gelezen["meta"]["version"]
+    assert bevestigd["configuratie"] == {
+        "doel": "dossiers samenvatten",
+        "vervaldatum": e["vervaldatum"],
+        "toegestaneTools": ["dossier_lezen", "notitie_toevoegen"],
+        "publiekeSleutel": e["publiekeSleutel"],
+        "herbeoordelingTermijn": inst.standaard_herbeoordeling,
+        "bevestigingstermijn": inst.standaard_bevestigingstermijn,
+    }
+    assert set(bevestigd["configuratie"]) == set(AGENT_CONFIGURATIE)
+
+
+async def test_uitgeschakeld_aangemaakte_agent_vraagt_eerst_de_beheerder(
+    register: Register,
+) -> None:
+    eigenaar = await register.mens("sanne")
+    agent = await register.agent(eigenaar, active=False)
+    record = await register.record(agent)
+    assert record["active"] is False
+    assert (_ext(record)["levenscyclusStatus"], _ext(record)["statusReden"]) == (
+        "gedeactiveerd",
+        "uitgeschakeld_door_beheerder",
+    )
+    assert (await register.bevestig(agent)).status_code == 409
+    assert register.opgeslagen(agent)["levenscyclusStatus"] == "gedeactiveerd"
+
+    aan = [{"op": "replace", "path": "active", "value": True}]
+    assert (await register.patch(f"/scim/v2/Users/{agent}", "beheerder", aan)).status_code == 200
+    assert register.opgeslagen(agent)["statusReden"] == "heractiveerd_door_beheerder"
+    assert (await register.bevestig(agent)).status_code == 200
+    assert register.opgeslagen(agent)["levenscyclusStatus"] == "actief"
+
+
 async def test_bevestiging_synchroniseert_teams(register: Register) -> None:
     eigenaar = await register.mens("sanne")
     await register.team("werk", eigenaar)
@@ -186,3 +302,61 @@ async def test_bevestiging_synchroniseert_teams(register: Register) -> None:
     }
     assert achtergebleven.object not in teams
     assert len(teams) == 1
+
+
+async def _niet_herbeoordeeld(register: Register, controle: bool) -> tuple[str, str, str]:
+    """Actieve agent waarvan de bevestigingstermijn na de herbeoordeling al is verstreken.
+
+    Opgeslagen staat hij nog op `actief`, effectief is hij `gedeactiveerd`; met `controle` heeft de
+    controle dat al opgeslagen.
+    """
+    eigenaar, team, agent = await _actieve_agent(
+        register, herbeoordelingTermijn="P1D", bevestigingstermijn="P1D"
+    )
+    register.dienst.klok.zet_vooruit(timedelta(days=3))
+    if controle:
+        await register.ok("POST", "/beheer/controle", "beheerder")
+    verwacht = "gedeactiveerd" if controle else "actief"
+    assert register.opgeslagen(agent)["levenscyclusStatus"] == verwacht
+    return eigenaar, team, agent
+
+
+def _status(register: Register, agent: str) -> tuple[object, object]:
+    e = register.opgeslagen(agent)
+    return e["levenscyclusStatus"], e["statusReden"]
+
+
+@pytest.mark.parametrize("controle", [False, True])
+async def test_groepswijziging_heractiveert_een_verlopen_bevestiging_niet(
+    register: Register, controle: bool
+) -> None:
+    eigenaar, team, agent = await _niet_herbeoordeeld(register, controle)
+    verwijder = [{"op": "remove", "path": f'members[value eq "{eigenaar}"]'}]
+    assert (await register.patch(f"/scim/v2/Groups/{team}", "bron", verwijder)).status_code == 200
+    assert _status(register, agent) == ("gedeactiveerd", "niet_herbeoordeeld")
+    # Ook zonder controle: de opgeslagen overgang neemt de toegangstuples mee.
+    assert not any(t.user == f"agent:{agent}" for t in register.fga.tuples)
+    assert (await register.bevestig(agent)).status_code == 409
+
+
+@pytest.mark.parametrize("controle", [False, True])
+async def test_configuratiewijziging_heractiveert_een_verlopen_bevestiging_niet(
+    register: Register, controle: bool
+) -> None:
+    _, _, agent = await _niet_herbeoordeeld(register, controle)
+    tools = [{"op": "replace", "path": f"{URN_AGENT}:toegestaneTools", "value": ["dossier_lezen"]}]
+    assert (await register.patch(f"/scim/v2/Users/{agent}", "beheerder", tools)).status_code == 200
+    assert _status(register, agent) == ("gedeactiveerd", "niet_herbeoordeeld")
+    assert (await register.bevestig(agent)).status_code == 409
+
+
+@pytest.mark.parametrize("controle", [False, True])
+async def test_leaver_laat_een_verlopen_agent_verlopen(register: Register, controle: bool) -> None:
+    eigenaar, _, agent = await _actieve_agent(register, dagen=1)
+    register.dienst.klok.zet_vooruit(timedelta(days=2))
+    if controle:
+        await register.ok("POST", "/beheer/controle", "beheerder")
+    uit = [{"op": "replace", "path": "active", "value": False}]
+    assert (await register.patch(f"/scim/v2/Users/{eigenaar}", "bron", uit)).status_code == 200
+    assert _status(register, agent) == ("verlopen", "vervaldatum_bereikt")
+    assert not any(t.user == f"agent:{agent}" for t in register.fga.tuples)

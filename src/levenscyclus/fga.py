@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import aiohttp
 import httpx2
 from openfga_sdk import (
     ClientConfiguration,
@@ -18,7 +19,6 @@ from openfga_sdk import (
 )
 from openfga_sdk.client.models import (
     ClientCheckRequest,
-    ClientListObjectsRequest,
     ClientTuple,
     ClientWriteRequest,
 )
@@ -26,6 +26,12 @@ from openfga_sdk.credentials import CredentialConfiguration, Credentials
 from openfga_sdk.exceptions import ApiException
 
 CONDITIE = "niet_verlopen"
+# De SDK zet een HTTP-foutstatus om in `ApiException`, maar laat verbindingsfouten en time-outs
+# van aiohttp ongewijzigd door (`openfga_sdk/rest.py`, `pool_manager.request`). Alle drie
+# betekenen: OpenFGA gaf geen bruikbaar antwoord.
+SDK_FOUTEN = (ApiException, aiohttp.ClientError, TimeoutError)
+# OpenFGA weigert standaard een write met meer dan 100 tuples (`maxTuplesPerWrite`).
+MAX_PER_WRITE = 100
 
 
 class FgaFout(Exception):
@@ -47,6 +53,11 @@ class Tuple:
     relation: str
     object: str
     vervaldatum: str | None = None
+
+    @property
+    def sleutel(self) -> tuple[str, str, str]:
+        """Waarmee OpenFGA een tuple identificeert: zonder conditie."""
+        return self.user, self.relation, self.object
 
     def client_tuple(self) -> ClientTuple:
         """Zet om naar het SDK-type."""
@@ -102,7 +113,7 @@ async def zorg_store(url: str, api_token: str, storenaam: str, model: dict[str, 
             bestaand = await client.read_latest_authorization_model()
             if bestaand.authorization_model is not None:
                 return FgaIds(store_id, bestaand.authorization_model.id)
-    except ApiException as fout:
+    except SDK_FOUTEN as fout:
         raise FgaFout(f"OpenFGA onbereikbaar of fout bij store of model: {fout}") from fout
     return FgaIds(store_id, await _schrijf_model(url, api_token, store_id, model))
 
@@ -155,7 +166,7 @@ class Fga:
         try:
             async with OpenFgaClient(self._configuratie) as client:
                 antwoord = await client.check(verzoek)
-        except ApiException as fout:
+        except SDK_FOUTEN as fout:
             raise FgaFout(f"OpenFGA-check mislukt: {fout}") from fout
         return bool(antwoord.allowed)
 
@@ -178,22 +189,16 @@ class Fga:
                     vervolg = antwoord.continuation_token or None
                     if not vervolg:
                         return gevonden
-        except ApiException as fout:
+        except SDK_FOUTEN as fout:
             raise FgaFout(f"OpenFGA-read mislukt: {fout}") from fout
 
     async def lees_per_subject(self, user: str, objecttype: str) -> set[Tuple]:
         """Alle tuples met dit subject op een objecttype, waar het object ook is."""
         return await self._lees(ReadRequestTupleKey(user=user, object=f"{objecttype}:"))
 
-    async def lees_als_user(self, user: str, relation: str, objecttype: str) -> set[str]:
-        """Objecten van een type waarop `user` deze relatie heeft (`ListObjects`)."""
-        verzoek = ClientListObjectsRequest(user=user, relation=relation, type=objecttype)
-        try:
-            async with OpenFgaClient(self._configuratie) as client:
-                antwoord = await client.list_objects(verzoek)
-        except ApiException as fout:
-            raise FgaFout(f"OpenFGA-list_objects mislukt: {fout}") from fout
-        return set(antwoord.objects or [])
+    async def lees_alles(self) -> set[Tuple]:
+        """Alle tuples in de store (een read zonder tuple key)."""
+        return await self._lees(ReadRequestTupleKey())
 
     async def synchroniseer(self, obj: str, relation: str, gewenst: set[Tuple]) -> bool:
         """Breng de tuples op `obj#relation` in de gewenste toestand en lees terug.
@@ -208,7 +213,7 @@ class Fga:
         verwijderen = huidig - gewenst
         toevoegen = gewenst - huidig
         if verwijderen or toevoegen:
-            await self._schrijf(toevoegen, verwijderen)
+            await self._pas_toe(toevoegen, verwijderen)
         if await self.lees(obj, relation) != gewenst:
             raise FgaFout(f"tuples op {obj}#{relation} kloppen na synchronisatie niet")
         return bool(verwijderen or toevoegen)
@@ -223,16 +228,35 @@ class Fga:
         verwijderen = huidig - gewenst
         toevoegen = gewenst - huidig
         if verwijderen or toevoegen:
-            await self._schrijf(toevoegen, verwijderen)
+            await self._pas_toe(toevoegen, verwijderen)
         if await self.lees_per_subject(user, objecttype) != gewenst:
             raise FgaFout(f"tuples van {user} op {objecttype} kloppen na synchronisatie niet")
         return bool(verwijderen or toevoegen)
 
+    async def verwijder(self, tuples: set[Tuple]) -> None:
+        """Verwijder deze tuples, in porties die OpenFGA in één write accepteert."""
+        for deel in _porties(tuples):
+            await self._schrijf(set(), deel)
+
     async def verwijder_alles(self, obj: str) -> None:
         """Verwijder alle tuples op een object (bij `DELETE` van een agent)."""
-        huidig = await self.lees(obj)
-        if huidig:
-            await self._schrijf(set(), huidig)
+        await self.verwijder(await self.lees(obj))
+
+    async def _pas_toe(self, toevoegen: set[Tuple], verwijderen: set[Tuple]) -> None:
+        """Schrijf een verschil, in één write als OpenFGA hem zo accepteert.
+
+        OpenFGA weigert een write met meer dan `MAX_PER_WRITE` tuples, en een write met dezelfde
+        sleutel in deletes en writes (`DuplicateTupleInWrite`), ook als alleen de conditie
+        verschilt, zoals bij een nieuwe vervaldatum. Dan gaan eerst de deletes en daarna de
+        writes, in porties: tussentijds is er minder toegang, nooit meer.
+        """
+        dubbel = {t.sleutel for t in toevoegen} & {t.sleutel for t in verwijderen}
+        if not dubbel and len(toevoegen) + len(verwijderen) <= MAX_PER_WRITE:
+            await self._schrijf(toevoegen, verwijderen)
+            return
+        await self.verwijder(verwijderen)
+        for deel in _porties(toevoegen):
+            await self._schrijf(deel, set())
 
     async def _schrijf(self, toevoegen: set[Tuple], verwijderen: set[Tuple]) -> None:
         verzoek = ClientWriteRequest(
@@ -242,8 +266,16 @@ class Fga:
         try:
             async with OpenFgaClient(self._configuratie) as client:
                 await client.write(verzoek)
-        except ApiException as fout:
+        except SDK_FOUTEN as fout:
             raise FgaFout(f"OpenFGA-write mislukt: {fout}") from fout
+
+
+def _porties(tuples: set[Tuple]) -> list[set[Tuple]]:
+    geordend = sorted(tuples)
+    return [
+        set(geordend[begin : begin + MAX_PER_WRITE])
+        for begin in range(0, len(geordend), MAX_PER_WRITE)
+    ]
 
 
 def _uit_sdk(sleutel: Any) -> Tuple:

@@ -7,6 +7,7 @@ via het register, dan één herhaling.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -83,7 +84,11 @@ class Toegang:
         self.register = register
         self.fga = fga
         self.opslag = opslag
-        self._dossierteams: dict[str, str] = {}
+        self._dossierteams: dict[str, str | None] = {}
+        # Eén schrijver tegelijk op `dossier#team`: twee toolcalls die tegelijk dezelfde tuple
+        # schrijven, laten de tweede write falen (OpenFGA weigert een bestaande tuple), en een
+        # herstel mag niet verweven raken met een koppeling op de oude store.
+        self._dossierslot = asyncio.Lock()
 
     # Stap 1 en 2 ------------------------------------------------------------------------------
 
@@ -166,8 +171,7 @@ class Toegang:
         if not dossier or dossier not in DOSSIERS:
             raise Geweigerd("relatie", "dossier_onbekend", f"dossier {dossier!r} bestaat niet", 403)
         try:
-            if dossier not in self._dossierteams:
-                await self.sync_dossiers()
+            await self._koppel_dossier(dossier)
             toegestaan = await self._check(
                 f"agent:{agent.id}",
                 relatie,
@@ -188,24 +192,41 @@ class Toegang:
     # Dossierrelaties en herstel ---------------------------------------------------------------
 
     async def sync_dossiers(self) -> None:
-        """`dossier#team` voor elk dossier waarvan het team als SCIM-groep bestaat (idempotent)."""
-        groepen = await self.register.groepen()
-        for nr, dossier in DOSSIERS.items():
-            team_id = groepen.get(dossier["team"].lower())
-            if team_id is None:
-                continue
-            await self.fga.synchroniseer(
-                f"dossier:{nr}", "team", {Tuple(f"team:{team_id}", "team", f"dossier:{nr}")}
-            )
-            self._dossierteams[nr] = team_id
+        """`dossier#team` voor elk dossier gelijk aan het huidige team (idempotent)."""
+        async with self._dossierslot:
+            for nr in DOSSIERS:
+                await self._koppel(nr)
+
+    async def _koppel_dossier(self, nr: str) -> None:
+        """Breng `dossier#team` van één dossier in lijn met de huidige SCIM-id van zijn team.
+
+        Een team dat wordt verwijderd en opnieuw aangemaakt, krijgt een nieuwe id. De poort vraagt
+        die id daarom bij elke relatiecheck op en schrijft alleen bij een verschil. Bestaat het
+        team niet, dan heeft het dossier geen teamrelatie en weigert de check.
+        """
+        async with self._dossierslot:
+            await self._koppel(nr)
+
+    async def _koppel(self, nr: str) -> None:
+        """`_koppel_dossier` voor wie het dossierslot al heeft."""
+        team_id = await self.register.team_id(DOSSIERS[nr]["team"])
+        if nr in self._dossierteams and self._dossierteams[nr] == team_id:
+            return
+        gewenst = {Tuple(f"team:{team_id}", "team", f"dossier:{nr}")} if team_id else set()
+        await self.fga.synchroniseer(f"dossier:{nr}", "team", gewenst)
+        self._dossierteams[nr] = team_id
 
     async def herstel(self) -> None:
         """Haal nieuwe id's bij het register (dat herstelt store en model); herschrijf dossiers."""
-        store_id, model_id = await self.register.openfga_ids()
-        if self.fga.vernieuw(FgaIds(store_id, model_id)):
-            log.warning("OpenFGA-store of model is vernieuwd; dossierrelaties worden herschreven")
-        self._dossierteams.clear()
-        await self.sync_dossiers()
+        async with self._dossierslot:
+            store_id, model_id = await self.register.openfga_ids()
+            if self.fga.vernieuw(FgaIds(store_id, model_id)):
+                log.warning(
+                    "OpenFGA-store of model is vernieuwd; dossierrelaties worden herschreven"
+                )
+            self._dossierteams.clear()
+            for nr in DOSSIERS:
+                await self._koppel(nr)
 
     # Alles samen ------------------------------------------------------------------------------
 
@@ -250,7 +271,9 @@ class Toegang:
             record.update(beslissing="geweigerd", reden=weigering.code)
             return Besluit(False, agent, record, weigering)
         if status == 409:
-            weigering = Geweigerd("logboek", "toestand_gewijzigd", str(gelogd.get("reden")), 403)
+            weigering = Geweigerd(
+                "logboek", "toestand_gewijzigd", str(gelogd.get("toelichting")), 403
+            )
             return Besluit(False, agent, gelogd, weigering)
         return Besluit(fout is None, agent, gelogd, fout)
 
@@ -262,7 +285,9 @@ def _record(
     controles: dict[str, str],
     fout: Geweigerd | None,
 ) -> dict[str, Any]:
-    if fout is None and tool is not None:
+    if tool is not None:
+        # Stap 5 legt elk tools/call-besluit vast, ook een eerdere weigering; mislukt dat, dan
+        # zet `_log` hem op geweigerd.
         controles["logboek"] = "ok"
     return {
         "soort": "toolcall",
