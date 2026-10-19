@@ -71,5 +71,6 @@ model:
 
 check: lint test model integratie
 
+## down: stop de keten en wis de volumes, ook zonder .env (down gebruikt de sleutel niet)
 down:
-	$(DOWN)
+	OPENFGA_PRESHARED_KEY=$${OPENFGA_PRESHARED_KEY:-ongebruikt} $(DOWN)
