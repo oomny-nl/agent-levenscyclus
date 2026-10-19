@@ -2,19 +2,43 @@
 
 [Nederlands](README.md)
 
-An AI agent is an identity with an owner and an expiry date. This repository shows that an agent
-can get the same lifecycle care as an employee: it is provisioned with a human owner, a purpose, an
-expiry date and a risk class. It exists only as long as its owner confirms it and follows its
-owner when they change jobs. When the owner leaves, the agent is deactivated and loses its access;
-its registration and audit trail are kept. Everything it does and everything that happens to it
-is recorded in one verifiable log.
+## In one minute
 
-The scenario takes place in the fictional municipality of Lindevoort. All names, case files and
-content are made up. The code, logs and identifiers are in Dutch.
+**Problem.** Who owns this agent, should it still exist, and what happens when that owner leaves?
+For employees, identity governance (IGA) addresses this through joiner-mover-leaver and
+recertification. A service account or API key alone does not provide that governance for an agent.
+
+**What the demo proves.** An agent always has a human owner and does nothing without that owner's
+confirmation. When the owner changes teams, the agent gets the new team's access only after a new
+confirmation. When the owner leaves, the agent is refused at its next tool call, even in the middle
+of a task. After the expiry date both the gateway and OpenFGA refuse it.
+
+**What it delivers.** Agents in the same governance process as employees: provisioning through
+SCIM 2.0, recertification with a hard deadline, authorisation through relationships in OpenFGA and
+one chained log an auditor can trace.
 
 ![Demo recording: joiner, prompt injection refused, mover, leaver and expired agent, with the chained log as evidence](docs/beeld/demo.gif)
 
-The recording shows `make speel` on a running stack (`make demo` runs `make up` and `make speel` in one go): five scenarios against the real stack, followed by the log as evidence. Record it again with `make opname` (requires [VHS](https://github.com/charmbracelet/vhs) and ffmpeg).
+Behind this repository are nearly eight years of identity work for the four largest Dutch
+municipalities: federation, SCIM provisioning and setting up Keycloak (cutover in preparation).
+Michael Owen Meijer ([Oomny B.V.](https://www.oomny.nl)) extends that work to AI agents in [three
+demos](https://github.com/oomny-nl).
+
+## Identity governance for agents
+
+This repository gives an AI agent the same identity governance as an employee: joiner-mover-leaver,
+recertification and ownership. A new agent (joiner) is provisioned through SCIM with a human owner,
+a purpose, an expiry date and a risk class. The owner recertifies it periodically and after every
+team change; without that confirmation (in the code: herbeoordeling) the agent does nothing. When
+the owner changes teams (mover), the agent's access follows the new team. When the owner leaves
+(leaver), the agent is deactivated and loses its access; its registration and audit trail are
+kept. Everything it does and everything that happens to it is recorded in one verifiable log.
+
+The scenario takes place in the fictional municipality of Lindevoort. All names, case files and
+content are made up. The code, logs and identifiers are in Dutch. The recording at the top shows
+`make speel` on a running stack (`make demo` runs `make up` and `make speel` in one go): five
+scenarios against the real stack, followed by the log as evidence. Record it again with
+`make opname` (requires [VHS](https://github.com/charmbracelet/vhs) and ffmpeg).
 
 ## What this proves
 
