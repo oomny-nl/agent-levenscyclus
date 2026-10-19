@@ -4,9 +4,9 @@
 
 ## In één minuut
 
-**Probleem.** Wie is eigenaar van deze agent, mag hij nog bestaan, en wat gebeurt er als zijn
-maker vertrekt? Voor medewerkers regelt identity governance (IGA) dat met joiner-mover-leaver en
-recertificering. Een agent met een gedeeld serviceaccount of een losse API-sleutel valt daarbuiten.
+**Probleem.** Wie is eigenaar van deze agent, mag hij nog bestaan, en wat gebeurt er als die
+eigenaar vertrekt? Voor medewerkers regelt identity governance (IGA) dat met joiner-mover-leaver en
+recertificering. Een serviceaccount of API-sleutel regelt dat op zichzelf niet voor een agent.
 
 **Wat de demo bewijst.** Een agent heeft altijd een menselijke eigenaar en doet niets zonder diens
 bevestiging. Wisselt de eigenaar van team, dan krijgt de agent pas na een nieuwe bevestiging de
@@ -20,8 +20,9 @@ logboek dat een auditor kan nalopen.
 ![Demo-opname: joiner, prompt-injectie geweigerd, mover, leaver en verlopen agent, met het geketende logboek als bewijs](docs/beeld/demo.gif)
 
 Achter deze repo zit bijna acht jaar identitywerk voor de vier grote gemeenten: federatie,
-SCIM-provisioning en de inrichting van Keycloak. Michael Owen Meijer ([Oomny B.V.](https://www.oomny.nl))
-trekt dat werk in [drie demo's](https://github.com/oomny-nl) door naar AI-agents.
+SCIM-provisioning en de inrichting van Keycloak (cutover in voorbereiding). Michael Owen Meijer
+([Oomny B.V.](https://www.oomny.nl)) trekt dat werk in [drie demo's](https://github.com/oomny-nl)
+door naar AI-agents.
 
 ## Identity governance voor agents
 

@@ -4,10 +4,9 @@
 
 ## In one minute
 
-**Problem.** Who owns this agent, should it still exist, and what happens when the person who
-created it leaves? For employees, identity governance (IGA) answers that with joiner-mover-leaver
-and recertification. An agent running on a shared service account or a loose API key falls outside
-that process.
+**Problem.** Who owns this agent, should it still exist, and what happens when that owner leaves?
+For employees, identity governance (IGA) addresses this through joiner-mover-leaver and
+recertification. A service account or API key alone does not provide that governance for an agent.
 
 **What the demo proves.** An agent always has a human owner and does nothing without that owner's
 confirmation. When the owner changes teams, the agent gets the new team's access only after a new
@@ -21,9 +20,9 @@ one chained log an auditor can trace.
 ![Demo recording: joiner, prompt injection refused, mover, leaver and expired agent, with the chained log as evidence](docs/beeld/demo.gif)
 
 Behind this repository are nearly eight years of identity work for the four largest Dutch
-municipalities: federation, SCIM provisioning and setting up Keycloak. Michael Owen Meijer
-([Oomny B.V.](https://www.oomny.nl)) extends that work to AI agents in
-[three demos](https://github.com/oomny-nl).
+municipalities: federation, SCIM provisioning and setting up Keycloak (cutover in preparation).
+Michael Owen Meijer ([Oomny B.V.](https://www.oomny.nl)) extends that work to AI agents in [three
+demos](https://github.com/oomny-nl).
 
 ## Identity governance for agents
 
