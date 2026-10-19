@@ -29,6 +29,24 @@ def _ext(record: dict[str, object]) -> dict[str, object]:
     return waarde
 
 
+async def test_bevestiging_na_gemiste_sync_vervangt_de_vervaldatum(register: Register) -> None:
+    # De verlenging viel samen met een OpenFGA-storing: de oude `gebruiker#agent`-tuple bleef
+    # staan. De bevestiging vervangt hem door die met de nieuwe vervaldatum.
+    _, _, agent = await _actieve_agent(register)
+    register.fga.faal = True
+    nieuw = iso(register.dienst.klok.nu() + timedelta(days=60))
+    verleng = [{"op": "replace", "path": f"{URN_AGENT}:vervaldatum", "value": nieuw}]
+    assert (
+        await register.patch(f"/scim/v2/Users/{agent}", "beheerder", verleng)
+    ).status_code == 200
+    register.fga.faal = False
+    assert (await register.bevestig(agent)).status_code == 200
+    [toegang] = [
+        t for t in register.fga.tuples if t.user == f"agent:{agent}" and t.relation == "agent"
+    ]
+    assert toegang.vervaldatum == register.opgeslagen(agent)["vervaldatum"]
+
+
 async def test_bevestiging_zonder_sync_activeert_niet(register: Register) -> None:
     eigenaar = await register.mens("sanne")
     await register.team("werk", eigenaar)
@@ -70,6 +88,12 @@ async def test_controle_ruimt_tuples_van_verwijderde_agent_en_medewerker_op(
     assert len(van(agent)) == 3
     assert len(van(collega)) == 1
     assert register.gebeurtenissen(agent)[-1] == "tuples_niet_gesynchroniseerd"
+    # De collega had geen agents; ook zijn mislukte opruiming staat in het logboek.
+    assert [
+        r["medewerkers"]
+        for r in register.dienst.opslag.logboek()
+        if r.get("gebeurtenis") == "tuples_niet_gesynchroniseerd" and "medewerkers" in r
+    ] == [[collega]]
     await register.ok("POST", "/beheer/controle", "beheerder")
     assert not van(agent)
     assert not van(collega)
@@ -310,6 +334,8 @@ async def test_groepswijziging_heractiveert_een_verlopen_bevestiging_niet(
     verwijder = [{"op": "remove", "path": f'members[value eq "{eigenaar}"]'}]
     assert (await register.patch(f"/scim/v2/Groups/{team}", "bron", verwijder)).status_code == 200
     assert _status(register, agent) == ("gedeactiveerd", "niet_herbeoordeeld")
+    # Ook zonder controle: de opgeslagen overgang neemt de toegangstuples mee.
+    assert not any(t.user == f"agent:{agent}" for t in register.fga.tuples)
     assert (await register.bevestig(agent)).status_code == 409
 
 
@@ -333,3 +359,4 @@ async def test_leaver_laat_een_verlopen_agent_verlopen(register: Register, contr
     uit = [{"op": "replace", "path": "active", "value": False}]
     assert (await register.patch(f"/scim/v2/Users/{eigenaar}", "bron", uit)).status_code == 200
     assert _status(register, agent) == ("verlopen", "vervaldatum_bereikt")
+    assert not any(t.user == f"agent:{agent}" for t in register.fga.tuples)

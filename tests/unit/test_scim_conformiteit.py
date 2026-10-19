@@ -282,6 +282,52 @@ async def test_rolwissel_is_mutability(register: Register) -> None:
     _fout(await register.verzoek("PUT", f"{USERS}/{agent}", "beheerder", body), 400, "mutability")
 
 
+# PATCH zonder path: patch en noodstop lezen dezelfde doelen (AL-31, AL-36) ------------------
+
+
+async def _bevestigde_agent(register: Register) -> str:
+    eigenaar = await register.mens(f"mw-{len(register.tokens)}")
+    await register.team(f"team-{len(register.tokens)}", eigenaar)
+    agent = await register.agent(eigenaar)
+    assert (await register.bevestig(agent)).status_code == 200
+    return agent
+
+
+@pytest.mark.parametrize("sleutel", [f"{URN_USER}:active", f"{URN_USER.upper()}:Active", "ACTIVE"])
+async def test_noodstop_zonder_path_in_elke_schrijfwijze(register: Register, sleutel: str) -> None:
+    agent = await _bevestigde_agent(register)
+    uit = _patch([{"op": "replace", "value": {sleutel: False}}])
+    assert (await register.ok("PATCH", f"{USERS}/{agent}", "beheerder", uit))["active"] is False
+    opgeslagen = register.opgeslagen(agent)
+    assert (opgeslagen["levenscyclusStatus"], opgeslagen["statusReden"]) == (
+        "gedeactiveerd",
+        "uitgeschakeld_door_beheerder",
+    )
+    assert not any(t.user == f"agent:{agent}" for t in register.fga.tuples)
+
+
+@pytest.mark.parametrize(
+    "waarde",
+    [
+        {"active": True, f"{URN_USER}:active": False},
+        {URN_AGENT: {"Doel": "a", "doel": "b"}},
+        {URN_AGENT: {"doel": "a"}, f"{URN_AGENT}:doel": "b"},
+        {URN_AGENT: {"doel": "a"}, URN_AGENT.upper(): {"risicoklasse": "hoog"}},
+    ],
+)
+async def test_dubbel_doel_zonder_path_is_invalid_value(
+    register: Register, waarde: dict[str, Any]
+) -> None:
+    agent = await _bevestigde_agent(register)
+    voor = register.opgeslagen(agent)
+    antwoord = await register.patch(
+        f"{USERS}/{agent}", "beheerder", [{"op": "replace", "value": waarde}]
+    )
+    _fout(antwoord, 400, "invalidValue")
+    assert register.opgeslagen(agent) == voor
+    assert (await register.record(agent))["active"] is True
+
+
 # Filter (AL-12) -----------------------------------------------------------------------------
 
 
@@ -410,6 +456,27 @@ async def test_if_match(register: Register) -> None:
 
 def _naam(waarde: str) -> dict[str, Any]:
     return {"op": "replace", "path": "displayName", "value": waarde}
+
+
+@pytest.mark.parametrize(
+    "versie",
+    ["garbage*", '*, W/"1"', 'W/"1" W/"2"', "W/1", '"1', 'W/ "1"', ",", 'w/"1"'],
+)
+async def test_ongeldige_if_match_wijzigt_niets(register: Register, versie: str) -> None:
+    jan = await register.mens("jan")
+    pad = f"{USERS}/{jan}"
+    _fout(await _met_versie(register, "PATCH", pad, versie, _patch([_naam("Jan")])), 412)
+    _fout(await _met_versie(register, "DELETE", pad, versie), 412)
+    assert "displayName" not in await register.ok("GET", pad, "bron")
+
+
+async def test_if_match_lijst_met_komma_in_tag_en_lege_elementen(register: Register) -> None:
+    jan = await register.mens("jan")
+    pad = f"{USERS}/{jan}"
+    lijst = ', "a,b" ,, W/"1",'
+    assert (
+        await _met_versie(register, "PATCH", pad, lijst, _patch([_naam("Jan")]))
+    ).status_code == 200
 
 
 async def test_if_match_op_groep(register: Register) -> None:

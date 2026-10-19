@@ -9,6 +9,7 @@ import aiohttp
 import pytest
 
 from levenscyclus.fga import Fga, FgaFout, FgaIds, Tuple, zorg_store
+from tests.unit.conftest import NepFga
 
 IDS = FgaIds("01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FAW")
 
@@ -49,3 +50,21 @@ async def test_timeout_en_verbroken_verbinding_worden_fgafout(
     monkeypatch.setattr(aiohttp.ClientSession, "_request", faal)
     with pytest.raises(FgaFout, match="check mislukt"):
         await Fga("http://openfga.invalid", "sleutel", IDS).check("agent:a", "toegestaan", "tool:x")
+
+
+async def test_synchronisatie_boven_maxtuplesperwrite_in_porties() -> None:
+    fga = NepFga()
+    gewenst = {Tuple("gebruiker:x", "lid", f"team:t{i:03}") for i in range(250)}
+    assert await fga.synchroniseer_subject("gebruiker:x", "team", gewenst)
+    assert fga.tuples == gewenst
+    assert await fga.synchroniseer_subject("gebruiker:x", "team", set())
+    assert fga.tuples == set()
+
+
+async def test_nieuwe_conditie_op_dezelfde_tuple_eerst_weg_dan_erbij() -> None:
+    # OpenFGA weigert dezelfde sleutel in deletes en writes van één request.
+    fga = NepFga()
+    fga.tuples = {Tuple("agent:a", "agent", "gebruiker:m", "2026-11-01T00:00:00.000Z")}
+    nieuw = {Tuple("agent:a", "agent", "gebruiker:m", "2027-01-01T00:00:00.000Z")}
+    assert await fga.synchroniseer_subject("agent:a", "gebruiker", nieuw)
+    assert fga.tuples == nieuw

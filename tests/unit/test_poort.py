@@ -6,6 +6,7 @@ register is een `MockTransport` en OpenFGA de `NepFga`.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Iterator
@@ -132,9 +133,7 @@ class Proef:
         return self.client.post("/mcp", json=bericht, headers=koppen)
 
 
-@pytest.fixture
-def proef(tmp_path: Path) -> Iterator[Proef]:
-    paar = Sleutelpaar.nieuw()
+def _toegang(tmp_path: Path, paar: Sleutelpaar) -> tuple[Toegang, NepRegister, NepFga]:
     nep = NepRegister(paar)
     register = Register("http://register.test", "poort-token")
     register._http = httpx2.AsyncClient(
@@ -142,9 +141,37 @@ def proef(tmp_path: Path) -> Iterator[Proef]:
     )
     fga = NepFga()
     opslag = PoortOpslag(tmp_path / "poort.db")
-    toegang = Toegang(instellingen(tmp_path), register, fga, opslag)
-    with TestClient(maak_app(toegang, opslag, register), base_url="http://poort.test") as client:
-        yield Proef(client, nep, fga, opslag, paar)
+    return Toegang(instellingen(tmp_path), register, fga, opslag), nep, fga
+
+
+@pytest.fixture
+def proef(tmp_path: Path) -> Iterator[Proef]:
+    paar = Sleutelpaar.nieuw()
+    toegang, nep, fga = _toegang(tmp_path, paar)
+    app = maak_app(toegang, toegang.opslag, toegang.register)
+    with TestClient(app, base_url="http://poort.test") as client:
+        yield Proef(client, nep, fga, toegang.opslag, paar)
+
+
+async def test_gelijktijdige_toolcalls_koppelen_het_dossier_een_keer(tmp_path: Path) -> None:
+    # Na een herstart of teamwissel kent de poort de koppeling nog niet; twee toolcalls tegelijk
+    # mogen dan niet allebei `dossier#team` schrijven (de tweede write zou falen).
+    paar = Sleutelpaar.nieuw()
+    toegang, nep, fga = _toegang(tmp_path, paar)
+    besluiten, _ = await asyncio.gather(
+        asyncio.gather(
+            *(
+                toegang.controleer(f"Bearer {paar.assertie(AGENT, AUD)}", "dossier_lezen", DOSSIER)
+                for _ in range(3)
+            )
+        ),
+        toegang.herstel(),
+    )
+    assert [b.record["beslissing"] for b in besluiten] == ["toegestaan"] * 3
+    assert Tuple("team:t1", "team", f"dossier:{DOSSIER}") in fga.tuples
+    # Alleen het expliciete herstel vraagt `/openfga`: geen mislukte write die een tweede
+    # herstel en een herhaalde check afdwingt.
+    assert nep.paden.count("/openfga") == 1
 
 
 def _code(antwoord: Any) -> str:
@@ -261,12 +288,18 @@ def _assertie(proef: Proef, sub: str = AGENT, **claims: Any) -> str:
     )
 
 
-def test_tijdclaim_als_string_wordt_gelogde_weigering(proef: Proef) -> None:
-    antwoord = proef.notitie(_assertie(proef, iat=f"{int(time.time())}"))
+@pytest.mark.parametrize(
+    "claims",
+    [{"iat": f"{int(time.time())}"}, {"exp": 10**400}, {"iat": -(10**400)}],
+    ids=["string", "exp-buiten-float", "iat-buiten-float"],
+)
+def test_ongeldige_tijdclaim_wordt_gelogde_weigering(proef: Proef, claims: dict[str, Any]) -> None:
+    antwoord = proef.notitie(_assertie(proef, **claims))
     assert antwoord.status_code == 401
     assert 'error="assertie_ongeldig"' in _code(antwoord)
     record = proef.register.gelogd[-1]
     assert (record["reden"], record["controles"]["assertie"]) == ("assertie_ongeldig", "geweigerd")
+    assert proef.opslag.notities(DOSSIER) == []
 
 
 @pytest.mark.parametrize(

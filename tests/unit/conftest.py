@@ -7,6 +7,7 @@ motor, opslag, logboek en poort draaien echt, met SQLite en anker in `tmp_path`.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from openfga_sdk import ReadRequestTupleKey
 from levenscyclus.assertie import Sleutelpaar
 from levenscyclus.beheer import agentresource
 from levenscyclus.config import Instellingen
-from levenscyclus.fga import Fga, FgaFout, FgaIds, Tuple
+from levenscyclus.fga import MAX_PER_WRITE, Fga, FgaFout, FgaIds, Tuple
 from levenscyclus.klok import Klok, iso
 from levenscyclus.register.app import Dienst, maak_app
 from levenscyclus.register.motor import Motor
@@ -29,6 +30,11 @@ from levenscyclus.register.opslag import Opslag
 from levenscyclus.register.scim import URN_AGENT, URN_PATCH
 
 MODEL = Path(__file__).resolve().parents[2] / "openfga" / "model.json"
+
+
+def _sleutels(tuples: set[Tuple]) -> set[tuple[str, str, str]]:
+    """De sleutels waarop OpenFGA dubbele tuples herkent: zonder conditie."""
+    return {(t.user, t.relation, t.object) for t in tuples}
 
 
 class NepFga(Fga):
@@ -46,10 +52,14 @@ class NepFga(Fga):
             raise FgaFout("OpenFGA onbereikbaar (test)")
 
     async def _lees(self, sleutel: ReadRequestTupleKey) -> set[Tuple]:
-        """Zoals de Read-API: zonder object (en dus zonder tuple key) de hele store."""
+        """Zoals de Read-API: zonder object (en dus zonder tuple key) de hele store.
+
+        Zoals een netwerkaanroep: de server leest nu, het antwoord komt een beurt later. Zo
+        kunnen gelijktijdige verzoeken elkaar tussen lezen en schrijven inhalen.
+        """
         self._grens()
         obj = sleutel.object
-        return {
+        gelezen = {
             t
             for t in self.tuples
             if (sleutel.user is None or t.user == sleutel.user)
@@ -58,9 +68,23 @@ class NepFga(Fga):
                 obj is None or (t.object.startswith(obj) if obj.endswith(":") else t.object == obj)
             )
         }
+        await asyncio.sleep(0)
+        return gelezen
 
     async def _schrijf(self, toevoegen: set[Tuple], verwijderen: set[Tuple]) -> None:
+        """Zoals de Write-API (`openfga/pkg/server/commands/write.go`): hoogstens
+        `MAX_PER_WRITE` tuples, geen sleutel dubbel in één write, en met de standaard
+        `on_duplicate`/`on_missing` = `error` faalt de hele write op een bestaande tuple of een
+        ontbrekende delete. Een sleutel is (user, relatie, object), zonder conditie."""
         self._grens()
+        if len(toevoegen) + len(verwijderen) > MAX_PER_WRITE:
+            raise FgaFout("OpenFGA-write mislukt: meer dan maxTuplesPerWrite (test)")
+        if _sleutels(toevoegen) & _sleutels(verwijderen):
+            raise FgaFout("OpenFGA-write mislukt: DuplicateTupleInWrite (test)")
+        if _sleutels(toevoegen) & _sleutels(self.tuples):
+            raise FgaFout("OpenFGA-write mislukt: tuple bestaat al (test)")
+        if not verwijderen <= self.tuples:
+            raise FgaFout("OpenFGA-write mislukt: tuple bestaat niet (test)")
         self.tuples = (self.tuples - verwijderen) | toevoegen
 
     async def check(

@@ -288,17 +288,27 @@ def _operatie(ruw: Any) -> Operatie:
     return Operatie(op, pad.strip() if pad is not None else None, operatie.get("value"))
 
 
+@dataclass(frozen=True)
+class Doel:
+    """Eén attribuut dat een operatie raakt: in de extensie of in het kernschema."""
+
+    in_extensie: bool
+    attr: str
+    waarde: Any
+
+
 def schakelaar_uit_patch(body: dict[str, Any]) -> bool | None:
-    """De `active`-waarde die een PatchOp expliciet zet, of None als hij `active` niet raakt."""
+    """De `active`-waarde die een PatchOp van een User expliciet zet, of None.
+
+    Leest de doelen op dezelfde manier als `pas_patch_toe`, zodat elke schrijfwijze die de
+    patch toepast (`active`, `ACTIVE`, `<kernschema>:active`) ook de schakelaar zet.
+    """
+    profiel = PROFIELEN["User"]
     gezet: bool | None = None
     for operatie in patchoperaties(body):
-        waarde = operatie.waarde
-        if operatie.pad is None and isinstance(waarde, dict):
-            waarde = normaliseer_namen(waarde, KERN).get("active")
-        elif operatie.pad is None or zonder_kernprefix(operatie.pad).lower() != "active":
-            continue
-        if isinstance(waarde, bool):
-            gezet = waarde
+        for doel in _doelen(operatie, profiel):
+            if not doel.in_extensie and doel.attr.lower() == "active":
+                gezet = doel.waarde if isinstance(doel.waarde, bool) else gezet
     return gezet
 
 
@@ -317,26 +327,47 @@ def pas_patch_toe(resource: dict[str, Any], body: dict[str, Any], soort: str) ->
     profiel = PROFIELEN[soort]
     nieuw = copy.deepcopy(resource)
     for operatie in patchoperaties(body):
-        if operatie.pad is None:
-            _patch_zonder_pad(nieuw, operatie, profiel)
-        else:
-            _patch_pad(nieuw, operatie, profiel)
+        for doel in _doelen(operatie, profiel):
+            _patch_doel(nieuw, operatie.op, doel, profiel)
     return nieuw
 
 
-def _patch_zonder_pad(resource: dict[str, Any], operatie: Operatie, profiel: Profiel) -> None:
+def _doelen(operatie: Operatie, profiel: Profiel) -> list[Doel]:
+    """De attributen die één operatie raakt, met of zonder `path`."""
+    if operatie.pad is not None:
+        return [Doel(*_splits_pad(operatie.pad, profiel), operatie.waarde)]
     if operatie.op == "remove":
         raise ScimFout(400, "remove vereist een path", "noTarget")
     if not isinstance(operatie.waarde, dict):
         raise ScimFout(400, "add/replace zonder path verwacht een object", "invalidValue")
-    for sleutel, inhoud in normaliseer_namen(operatie.waarde, KERN).items():
-        if profiel.extensie and sleutel == URN_AGENT:
-            if not isinstance(inhoud, dict):
-                raise ScimFout(400, f"{URN_AGENT} verwacht een object", "invalidValue")
-            for sub, subwaarde in inhoud.items():
-                _patch_extensie(resource, operatie.op, sub, subwaarde)
-        else:
-            _patch_pad(resource, Operatie(operatie.op, sleutel, inhoud), profiel)
+    return _doelen_zonder_pad(operatie.waarde, profiel)
+
+
+def _doelen_zonder_pad(waarde: dict[str, Any], profiel: Profiel) -> list[Doel]:
+    """Doelen van een waardeobject (RFC 7644 §3.5.2.1 en §3.5.2.3).
+
+    Een sleutel is een attribuut (`active`), een schema-gekwalificeerd attribuut
+    (`<kernschema>:active`, `<extensie>:doel`) of de extensie als object.
+
+    Raises:
+        ScimFout: `400 invalidValue` als één attribuut in twee schrijfwijzen voorkomt.
+    """
+    doelen: dict[tuple[bool, str], Doel] = {}
+    for sleutel, inhoud in normaliseer_namen(waarde, KERN).items():
+        for doel in _doelen_van_sleutel(sleutel, inhoud, profiel):
+            index = (doel.in_extensie, doel.attr.lower())
+            if index in doelen:
+                raise ScimFout(400, f"attribuut {doel.attr!r} komt dubbel voor", "invalidValue")
+            doelen[index] = doel
+    return list(doelen.values())
+
+
+def _doelen_van_sleutel(sleutel: str, inhoud: Any, profiel: Profiel) -> list[Doel]:
+    if not (profiel.extensie and sleutel == URN_AGENT):
+        return [Doel(*_splits_pad(sleutel, profiel), inhoud)]
+    if not isinstance(inhoud, dict):
+        raise ScimFout(400, f"{URN_AGENT} verwacht een object", "invalidValue")
+    return [Doel(True, sub, subwaarde) for sub, subwaarde in inhoud.items()]
 
 
 def _splits_pad(pad: str, profiel: Profiel) -> tuple[bool, str]:
@@ -351,14 +382,14 @@ def _splits_pad(pad: str, profiel: Profiel) -> tuple[bool, str]:
     return False, pad
 
 
-def _patch_pad(resource: dict[str, Any], operatie: Operatie, profiel: Profiel) -> None:
-    in_extensie, attr = _splits_pad(str(operatie.pad), profiel)
-    if in_extensie:
-        _patch_extensie(resource, operatie.op, attr, operatie.waarde)
+def _patch_doel(resource: dict[str, Any], op: str, doel: Doel, profiel: Profiel) -> None:
+    attr = doel.attr
+    if doel.in_extensie:
+        _patch_extensie(resource, op, attr, doel.waarde)
     elif "members" in profiel.schrijfbaar and (attr.lower() == "members" or _LEDENPAD.match(attr)):
-        _patch_leden(resource, operatie.op, attr, operatie.waarde)
+        _patch_leden(resource, op, attr, doel.waarde)
     else:
-        _patch_kern(resource, operatie, attr, profiel)
+        _patch_kern(resource, Operatie(op, attr, doel.waarde), attr, profiel)
 
 
 def _alleen_topniveau(attr: str) -> None:

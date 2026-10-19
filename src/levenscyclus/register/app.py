@@ -41,7 +41,10 @@ RELATIES = ("lezen", "notitie_schrijven", "besluit_nemen")
 MAX_BODY = 256 * 1024
 # Altijd teruggegeven, ook bij `attributes` (RFC 7643 §3.1, `returned: always`).
 ALTIJD = ("id", "schemas")
-_ETAGS = re.compile(r'\*|(?:W/)?"[^"]*"')
+# `If-Match = "*" / #entity-tag` (RFC 9110 §13.1.1 en §8.8.3); lege lijstelementen tellen niet
+# (§5.6.1). Een opaque tag kan zelf een komma bevatten, dus de lijst wordt als geheel ontleed.
+_ETAG = r'(?:W/)?"[\x21\x23-\x7e\x80-\xff]*"'
+_ETAGLIJST = re.compile(rf"[ \t,]*{_ETAG}(?:[ \t]*,[ \t,]*{_ETAG})*[ \t,]*")
 # Het toolcall-record van de poort (ONTWERP §4.4 en §4.5); gelijk aan `poort.toegang._record`.
 STAPPEN = ("assertie", "levenscyclus", "tool", "relatie", "logboek")
 UITKOMSTEN = ("ok", "geweigerd", "niet_uitgevoerd")
@@ -265,16 +268,23 @@ def _eis_versie(request: Request, huidig: dict[str, Any]) -> None:
 
     Zwakke vergelijking: SCIM gebruikt zwakke ETags (`W/"3"`) juist met `If-Match` (RFC 7644
     §3.14), terwijl RFC 9110 §13.1.1 voor `If-Match` sterke vergelijking voorschrijft en een zwakke
-    ETag dan nooit zou overeenkomen. Zonder header geldt last-write-wins.
+    ETag dan nooit zou overeenkomen. Zonder header geldt last-write-wins. Een waarde die geen `*`
+    en geen lijst van entity-tags is, kan niet overeenkomen: ook `412`, vóór er iets wijzigt.
     """
     koppen = request.headers.getlist("if-match")
     if not koppen:
         return
-    tags = _ETAGS.findall(", ".join(koppen))
-    versie = str(huidig["meta"]["version"])
-    if "*" in tags or versie.removeprefix("W/") in {t.removeprefix("W/") for t in tags}:
+    waarde = ", ".join(koppen).strip(" \t")
+    if waarde == "*":
         return
-    raise ScimFout(412, f"If-Match komt niet overeen met de huidige versie {versie}")
+    versie = str(huidig["meta"]["version"])
+    if not _ETAGLIJST.fullmatch(waarde):
+        raise ScimFout(
+            412, f"If-Match {waarde!r} is geen * en geen lijst van entity-tags (RFC 9110 §13.1.1)"
+        )
+    tags = {t.removeprefix("W/") for t in re.findall(_ETAG, waarde)}
+    if versie.removeprefix("W/") not in tags:
+        raise ScimFout(412, f"If-Match komt niet overeen met de huidige versie {versie}")
 
 
 def _log_scim(

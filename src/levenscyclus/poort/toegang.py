@@ -7,6 +7,7 @@ via het register, dan één herhaling.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -84,6 +85,10 @@ class Toegang:
         self.fga = fga
         self.opslag = opslag
         self._dossierteams: dict[str, str | None] = {}
+        # Eén schrijver tegelijk op `dossier#team`: twee toolcalls die tegelijk dezelfde tuple
+        # schrijven, laten de tweede write falen (OpenFGA weigert een bestaande tuple), en een
+        # herstel mag niet verweven raken met een koppeling op de oude store.
+        self._dossierslot = asyncio.Lock()
 
     # Stap 1 en 2 ------------------------------------------------------------------------------
 
@@ -188,8 +193,9 @@ class Toegang:
 
     async def sync_dossiers(self) -> None:
         """`dossier#team` voor elk dossier gelijk aan het huidige team (idempotent)."""
-        for nr in DOSSIERS:
-            await self._koppel_dossier(nr)
+        async with self._dossierslot:
+            for nr in DOSSIERS:
+                await self._koppel(nr)
 
     async def _koppel_dossier(self, nr: str) -> None:
         """Breng `dossier#team` van één dossier in lijn met de huidige SCIM-id van zijn team.
@@ -198,6 +204,11 @@ class Toegang:
         die id daarom bij elke relatiecheck op en schrijft alleen bij een verschil. Bestaat het
         team niet, dan heeft het dossier geen teamrelatie en weigert de check.
         """
+        async with self._dossierslot:
+            await self._koppel(nr)
+
+    async def _koppel(self, nr: str) -> None:
+        """`_koppel_dossier` voor wie het dossierslot al heeft."""
         team_id = await self.register.team_id(DOSSIERS[nr]["team"])
         if nr in self._dossierteams and self._dossierteams[nr] == team_id:
             return
@@ -207,11 +218,15 @@ class Toegang:
 
     async def herstel(self) -> None:
         """Haal nieuwe id's bij het register (dat herstelt store en model); herschrijf dossiers."""
-        store_id, model_id = await self.register.openfga_ids()
-        if self.fga.vernieuw(FgaIds(store_id, model_id)):
-            log.warning("OpenFGA-store of model is vernieuwd; dossierrelaties worden herschreven")
-        self._dossierteams.clear()
-        await self.sync_dossiers()
+        async with self._dossierslot:
+            store_id, model_id = await self.register.openfga_ids()
+            if self.fga.vernieuw(FgaIds(store_id, model_id)):
+                log.warning(
+                    "OpenFGA-store of model is vernieuwd; dossierrelaties worden herschreven"
+                )
+            self._dossierteams.clear()
+            for nr in DOSSIERS:
+                await self._koppel(nr)
 
     # Alles samen ------------------------------------------------------------------------------
 

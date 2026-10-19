@@ -288,7 +288,11 @@ class Motor:
         await self.fga.synchroniseer_subject(subject, "tool", tools)
 
     async def _sync_gelogd(self, agents: list[dict[str, Any]], eigenaren: set[str]) -> None:
-        """Toegang van deze agents en teams van deze eigenaren synchroniseren; fouten gelogd."""
+        """Toegang van deze agents en teams van deze medewerkers synchroniseren; fouten gelogd.
+
+        Een fout komt in het logboek per agent en, als er teams mee moesten, één keer voor de
+        medewerkers: ook een medewerker zonder agents laat zo een spoor na.
+        """
         try:
             for eigenaar in eigenaren:
                 await self._sync_teams_van(eigenaar)
@@ -298,6 +302,17 @@ class Motor:
             log.error("tuples niet gesynchroniseerd: %s", fout)
             for agent in agents:
                 self._log_levenscyclus(agent, "tuples_niet_gesynchroniseerd", "register", str(fout))
+            if eigenaren:
+                self.opslag.log(
+                    {
+                        "soort": "levenscyclus",
+                        "gebeurtenis": "tuples_niet_gesynchroniseerd",
+                        "medewerkers": sorted(eigenaren),
+                        "actor": "register",
+                        "reden": str(fout),
+                    },
+                    self.klok.nu(),
+                )
 
     async def herbouw_alles(self) -> None:
         """Alle register-tuples uit de SCIM-records afleiden (controle, herstel na storeverlies)."""
@@ -417,19 +432,23 @@ class Motor:
         """Mover, in de transactie van de groepsmutatie.
 
         Returns:
-            De eigenaren wier lidmaatschap feitelijk veranderde en hun geblokkeerde agents.
+            De eigenaren wier lidmaatschap feitelijk veranderde en hun agents waarvan de status
+            veranderde: geblokkeerd door deze wijziging of door een al ingetreden tijdregel.
         """
         oude_leden = leden_van(oud) if oud else set()
         nieuwe_leden = leden_van(nieuw) if nieuw else set()
         gewijzigd = oude_leden ^ nieuwe_leden
         reden = "eigenaar_van_team_gewisseld"
         getroffen = []
-        for agent in map(self._actueel, self._agents_van(gewijzigd)):
-            status = ext(agent).get("levenscyclusStatus")
+        for actueel, veranderd in map(self._actueel, self._agents_van(gewijzigd)):
+            status = ext(actueel).get("levenscyclusStatus")
             if status == ACTIEF:
-                getroffen.append(self._bewaar_status(agent, HERBEOORDELING, reden, "bron"))
-            elif status == HERBEOORDELING:
-                self._verhoog_versie(agent, reden, "bron")
+                getroffen.append(self._bewaar_status(actueel, HERBEOORDELING, reden, "bron"))
+                continue
+            if status == HERBEOORDELING:
+                self._verhoog_versie(actueel, reden, "bron")
+            if veranderd:
+                getroffen.append(actueel)
         return gewijzigd, getroffen
 
     def _verhoog_versie(self, agent: dict[str, Any], reden: str, actor: str) -> None:
@@ -454,16 +473,24 @@ class Motor:
     def blokkeer_na_gebruikerswijziging(
         self, oud: dict[str, Any], nieuw: dict[str, Any] | None
     ) -> list[dict[str, Any]]:
-        """Leaver, in de transactie van de gebruikersmutatie: agents van de eigenaar uit."""
+        """Leaver, in de transactie van de gebruikersmutatie: agents van de eigenaar uit.
+
+        Returns:
+            De agents waarvan de status veranderde, ook door een al ingetreden tijdregel.
+        """
         was_actief = oud.get("active", True)
         is_nu_actief = nieuw is not None and nieuw.get("active", True)
         if not was_actief or is_nu_actief:
             return []
-        return [
-            self._bewaar_status(agent, GEDEACTIVEERD, "eigenaar_vertrokken", "bron")
-            for agent in map(self._actueel, self._agents_van({oud["id"]}))
-            if ext(agent).get("levenscyclusStatus") in INGESCHAKELD and not is_noodstop(agent)
-        ]
+        getroffen = []
+        for actueel, veranderd in map(self._actueel, self._agents_van({oud["id"]})):
+            if ext(actueel).get("levenscyclusStatus") in INGESCHAKELD and not is_noodstop(actueel):
+                getroffen.append(
+                    self._bewaar_status(actueel, GEDEACTIVEERD, "eigenaar_vertrokken", "bron")
+                )
+            elif veranderd:
+                getroffen.append(actueel)
+        return getroffen
 
     async def sync_na_gebruikerswijziging(
         self, gebruiker_id: str, getroffen: list[dict[str, Any]]
@@ -483,7 +510,7 @@ class Motor:
         van de beheerder (None als hij `active` niet zet); hij wordt nooit afgeleid uit een
         verschil tussen opgeslagen en effectieve toestand.
         """
-        oud = self._actueel(oud)
+        oud, _ = self._actueel(oud)
         oe, ne = ext(oud), ext(nieuw)
         for sleutel in STATUSVELDEN:
             if sleutel in oe:
@@ -552,14 +579,19 @@ class Motor:
 
     # Controle en toelating --------------------------------------------------------------------
 
-    def _actueel(self, agent: dict[str, Any]) -> dict[str, Any]:
+    def _actueel(self, agent: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         """De agent met een al ingetreden tijdregel opgeslagen, vóór een gebeurtenis erop inwerkt.
 
         Zo bouwt een groepswijziging, leaver of beheerderswijziging voort op de effectieve status:
         een agent die al is verlopen of gedeactiveerd, komt niet terug in `herbeoordeling_vereist`,
         en de uitkomst hangt niet af van of de controle al heeft gedraaid.
+
+        Returns:
+            De opgeslagen agent en of zijn status hierdoor veranderde; dan moeten ook zijn
+            toegangstuples mee.
         """
-        return self._maak_persistent(agent, "register")[0]
+        opgeslagen, overgang = self._maak_persistent(agent, "register")
+        return opgeslagen, overgang is not None
 
     def _maak_persistent(
         self, agent: dict[str, Any], actor: str = "controle"

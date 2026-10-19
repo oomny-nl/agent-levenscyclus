@@ -114,23 +114,26 @@ de repo claimt niet meer dan wat hieronder staat.
 | Onderdeel | Ondersteund | Niet ondersteund (gedocumenteerd, herkenbaar geweigerd) |
 |---|---|---|
 | Discovery | `GET /ServiceProviderConfig`, `/ResourceTypes` en `/ResourceTypes/{id}` (met `schemaExtensions` voor `User`), `/Schemas` en `/Schemas/{uri}` (core `User`, core `Group`, agentextensie met subattribuutmetadata); de lijsten als `ListResponse` (RFC 7644 §4); elke `meta.location` en `$ref` is een absolute URL op de basis-URL van het register (`REGISTER_BASIS`, standaard `REGISTER_URL`) | `filter` op een discovery-endpoint: `403` (RFC 7644 §4) |
-| Attribuutnamen | hoofdletterongevoelig (RFC 7643 §2.1): `Active` in een body of PATCH-`path` is `active`; het register slaat de canonieke schrijfwijze op, vóór validatie en rolscheiding. Een attribuut in twee schrijfwijzen in één object: `400 invalidValue` | |
+| Attribuutnamen | hoofdletterongevoelig (RFC 7643 §2.1): `Active` in een body of PATCH-`path` is `active`; het register slaat de canonieke schrijfwijze op, vóór validatie en rolscheiding. Een attribuut in twee schrijfwijzen of in twee vormen (kaal en schema-gekwalificeerd, los en in de extensiecontainer) in één object: `400 invalidValue` | |
 | Attributen | strikt profiel. `User`: `userName` (verplicht, uniek, hoofdletterongevoelig), `displayName`, `userType`, `externalId`, `active` (standaard `true`, daarna altijd bepaald) en bij een agent de extensie; `groups` (readOnly, met absolute `$ref`). `Group`: `displayName` (verplicht, uniek), `externalId`, `members`. `null` is niet toegekend (RFC 7643 §2.5) | elk ander attribuut, ook uit het kernschema (`name`, `emails`): `400 invalidValue` in plaats van stil negeren |
 | Resources | `POST`, `GET`, `PUT`, `PATCH`, `DELETE` op `/Users` en `/Groups`; servergegenereerde `id` en `meta` (`resourceType`, `created`, `lastModified`, `location`, `version`); `schemas` met core- en extensie-URI; extensieattributen in de extensiecontainer; een verwijderde medewerker verdwijnt ook uit elke groep | `/Me` (elke methode), `POST /Bulk` en `POST .../.search`: `501` als SCIM-fout (RFC 7644 §3.11 en §3.12); enterprise-extensie, geneste groepen (een `member` moet een `User` zijn) |
 | Filter | `attr eq "waarde"` (de waarde als JSON-string) op `userName`, `displayName`, `userType`, `externalId`, `id`; combinaties met `and`; `id` en `externalId` exact, de rest hoofdletterongevoelig | `ne`, `co`, `sw`, `pr`, `or`, `not`, groepering, filters op extensieattributen: `400 invalidFilter` |
 | Projectie (RFC 7644 §3.9) | `attributes` of `excludedAttributes` op lijsten, `GET` per resource en de antwoorden van `POST`, `PUT` en `PATCH`; hele attributen, met of zonder kernschema-prefix, en de agentextensie als geheel; `id` en `schemas` komen altijd terug; `ETag` en `Location` blijven staan | beide parameters tegelijk, een subattribuut (`members.value`) of een attribuut uit een ander schema: `400 invalidValue`, vóór er iets wijzigt |
-| PATCH (RFC 7644 §3.5.2) | `add`, `remove`, `replace`, operatienaam hoofdletterongevoelig; `path` als `attr`, `kern-urn:attr`, `ext-urn:attr`, `members`, `members[value eq "id"]` (alleen `remove`); `add`/`replace` zonder `path` met een waardeobject; `remove` van een niet-lid slaagt; een readOnly-attribuut mag alleen ongewijzigd terugkomen; alle operaties atomair: faalt één, dan verandert niets | `remove` zonder `path`: `400 noTarget`; `remove` of `null` op een verplicht attribuut en elke wijziging van een readOnly-attribuut: `400 mutability`; andere filterexpressies en subattribuutpaden in `path`: `400 invalidPath` |
+| PATCH (RFC 7644 §3.5.2) | `add`, `remove`, `replace`, operatienaam hoofdletterongevoelig; `path` als `attr`, `kern-urn:attr`, `ext-urn:attr`, `members`, `members[value eq "id"]` (alleen `remove`); `add`/`replace` zonder `path` met een waardeobject, met kale of schema-gekwalificeerde sleutels (`urn:ietf:params:scim:schemas:core:2.0:User:active`, `ext-urn:attr`) of de extensiecontainer, met hetzelfde gevolg als het overeenkomende `path`; `remove` van een niet-lid slaagt; een readOnly-attribuut mag alleen ongewijzigd terugkomen; alle operaties atomair: faalt één, dan verandert niets | `remove` zonder `path`: `400 noTarget`; een waarde zonder `path` die geen object is: `400 invalidValue`; `remove` of `null` op een verplicht attribuut en elke wijziging van een readOnly-attribuut: `400 mutability`; andere filterexpressies en subattribuutpaden in `path`: `400 invalidPath` |
 | PUT | Vervangt de resource; `readOnly`- en serverattributen uit de body worden genegeerd (RFC 7644 §3.3), `id` en `meta` blijven | |
 | ListResponse | `totalResults`, `itemsPerPage`, `startIndex`, `Resources`; `startIndex` kleiner dan 1 telt als 1, een negatieve `count` als 0, hoogstens 200 per pagina (`filter.maxResults`) | `sortBy`, `sortOrder`: `400 invalidValue` (`sort.supported` is `false`) |
 | Fouten | `urn:ietf:params:scim:api:messages:2.0:Error` met `status`, `detail` en bij `400` een `scimType` (`invalidSyntax`, `invalidFilter`, `invalidValue`, `mutability`, `noTarget`, `invalidPath`); `409 uniqueness` bij een bezette naam; ook `401`, `403`, `404`, `405`, `412`, `413` en `501` onder `/scim/v2` als SCIM-fout | |
-| Concurrency (RFC 7644 §3.14) | `meta.version` als zwakke ETag (`W/"3"`) in de resource en in `ETag`; `If-Match` bij `PUT`, `PATCH` en `DELETE` op `/Users` en `/Groups`, met `*` of een lijst, zwak vergeleken (zie de toelichting hieronder); een andere versie: `412`, er verandert niets; zonder `If-Match` geldt last-write-wins | `If-None-Match`: een `GET` geeft altijd `200` met de hele resource, omdat de effectieve status en `groups` afgeleid zijn en kunnen veranderen zonder dat `meta.version` verandert |
+| Concurrency (RFC 7644 §3.14) | `meta.version` als zwakke ETag (`W/"3"`) in de resource en in `ETag`; `If-Match` bij `PUT`, `PATCH` en `DELETE` op `/Users` en `/Groups`, met `*` of een lijst, zwak vergeleken (zie de toelichting hieronder); een andere versie, of een waarde die geen `*` en geen lijst van entity-tags is (`W/1`, `garbage*`): `412`, er verandert niets; zonder `If-Match` geldt last-write-wins | `If-None-Match`: een `GET` geeft altijd `200` met de hele resource, omdat de effectieve status en `groups` afgeleid zijn en kunnen veranderen zonder dat `meta.version` verandert |
 | Media | `application/scim+json` (ook `application/json` geaccepteerd) | |
 
 `If-Match` vergelijkt zwak. RFC 9110 §13.1.1 schrijft voor `If-Match` sterke vergelijking voor,
 waarbij een zwakke ETag nooit overeenkomt; SCIM gebruikt juist zwakke ETags met `If-Match` (RFC
 7644 §3.14). Het register volgt SCIM: `W/"3"` en `"3"` matchen allebei versie 3. Een client die
 `If-Match` meestuurt, krijgt zo optimistische concurrency. De demo stuurt geen `If-Match` mee en
-werkt dus last-write-wins.
+werkt dus last-write-wins. De header zelf moet wel de syntax van RFC 9110 §13.1.1 volgen: `*` of
+een kommalijst van entity-tags tussen aanhalingstekens, waarbij lege lijstelementen niet meetellen
+(§5.6.1). Een ongeldige waarde geeft `412` en wordt niet genegeerd: negeren zou van een client die
+om een voorwaarde vraagt stil een last-write-wins-schrijver maken.
 
 #### Agentextensie
 
@@ -343,6 +346,12 @@ Teams zijn SCIM-groepen; OpenFGA kent ze onder de SCIM-id van de groep.
 Alle tuplewijzigingen zijn **gewenste-toestandsynchronisaties**, geen losse add/remove-stappen: het
 register leest de bestaande tuples (`Read`), berekent het verschil met de gewenste verzameling uit
 de SCIM-records, schrijft deletes en writes in één `Write`, en leest terug dat het resultaat klopt.
+Twee grenzen van OpenFGA dwingen soms meer dan één `Write` af: hoogstens 100 tuples per verzoek
+(`maxTuplesPerWrite`), en nooit dezelfde tuple in de deletes én de writes van één verzoek
+(`DuplicateTupleInWrite`; dat gebeurt bij een eigenaarsrelatie met een nieuwe vervaldatum als
+conditie). Dan gaan eerst alle deletes en daarna de writes, in porties van 100. Tussen die
+verzoeken ontbreekt hoogstens een relatie, er komt er geen bij; mislukt een latere portie, dan geldt
+wat hieronder voor elke mislukte synchronisatie staat.
 De leesrichting is **per subject**, niet per object, zodat ook relaties op voormalige objecten
 worden gevonden: de toegangsrelaties van een agent zijn alle tuples met `user = agent:<id>` op de
 objecttypen `gebruiker` en `tool` (dus ook die op een vorige eigenaar of een ingetrokken tool); de
@@ -362,8 +371,9 @@ De tuples van de poort (`dossier#team`) blijven daarbij buiten schot. De volgord
   van vóór of van ná die transactie, nooit een groep met nieuwe leden naast een agent die nog
   `actief` is. Elke statuswijziging verhoogt `meta.version` van de agent. Pas daarna volgt de
   synchronisatie van team- en toegangsrelaties. Mislukt die, dan blijft de status geblokkeerd, wordt
-  `tuples_niet_gesynchroniseerd` gelogd en herhaalt de volgende controle de synchronisatie; de
-  blokkering zelf hangt niet van OpenFGA af.
+  `tuples_niet_gesynchroniseerd` gelogd (per getroffen agent, en één record met het veld
+  `medewerkers` voor de teamrelaties, ook als die medewerkers geen agent hebben) en herhaalt de
+  volgende controle de synchronisatie; de blokkering zelf hangt niet van OpenFGA af.
 - **Naar `actief`** (bevestiging): eerst de teamrelaties van de eigenaar en de toegangsrelaties van
   de agent synchroniseren en teruglezen, en pas als dat aantoonbaar is geslaagd `actief` opslaan.
   Mislukt de synchronisatie, dan blijft de agent `herbeoordeling_vereist`, krijgt de eigenaar een
@@ -374,6 +384,12 @@ De tuples van de poort (`dossier#team`) blijven daarbij buiten schot. De volgord
   lidmaatschap feitelijk verandert in één transactie, daarna de teamtuples van die eigenaren en de
   toegangsrelaties van die agents synchroniseren. Een nog actieve agent krijgt zo nooit, ook niet
   kort, de dossiers van het nieuwe team zonder herbeoordeling.
+- **Tijdregel vóór de gebeurtenis**: is de vervaldatum of de bevestigingstermijn van een agent al
+  verstreken voordat een mover, leaver of beheerderswijziging hem raakt, dan slaat het register in
+  dezelfde transactie eerst die effectieve status op (`verlopen`, `gedeactiveerd`) en laat het de
+  gebeurtenis daarop inwerken. Zo'n agent komt niet terug in `herbeoordeling_vereist`, en zijn
+  toegangsrelaties gaan mee in de synchronisatie van die gebeurtenis, los van of de controle al
+  heeft gedraaid.
 
 Het register verwerkt SCIM-mutaties, bevestigingen en controles achter één proceslock, zodat een
 synchronisatie en een bevestiging elkaar niet kunnen doorkruisen.
@@ -392,7 +408,10 @@ groepen) de actuele SCIM-id van het team op; is die veranderd, of bestaat het te
 synchroniseert zij de relatie van dat dossier eerst. Ook synchroniseert zij opnieuw zodra zij bij
 een check een OpenFGA-fout krijgt. Zij haalt dan `GET /openfga` op (wat het herstel
 in het register afdwingt), synchroniseert haar dossiers tegen de nieuwe id's en herhaalt de check
-één keer; faalt ook die, dan weigert zij. Een aparte init-container is er niet.
+één keer; faalt ook die, dan weigert zij. Een aparte init-container is er niet. De poort schrijft
+dossierrelaties achter één slot (`asyncio.Lock`): gelijktijdige toolcalls die hetzelfde dossier
+opnieuw koppelen, en een herstel na storeverlies, wachten op elkaar. Zonder slot zouden twee calls
+dezelfde tuple schrijven en zou de tweede falen, want OpenFGA weigert een tuple die al bestaat.
 
 ### 4.4 Poort: MCP-gateway
 
@@ -417,10 +436,10 @@ Eisen aan de assertie, alle verplicht, de eerste afwijking weigert met `401`:
 | Header | `alg` precies `ES256`, `typ` `JWT`; `jku`, `x5u`, `x5c` en `kid` worden genegeerd: de sleutel komt uitsluitend uit het SCIM-record van `sub` |
 | `iss`, `sub` | aanwezig, gelijk aan elkaar en aan de SCIM-`id` van een bestaand record met `userType == agent` (een medewerker-id: `agent_onbekend`). Omdat `sub` vóór de handtekeningcontrole wordt gelezen, vraagt de poort alleen een `sub` in de vorm die het register uitgeeft (een UUID in canonieke schrijfwijze) op, als één gecodeerd padsegment; elke andere `sub` is `agent_onbekend` zonder verzoek aan het register. Geeft het register een record met een andere `id`, dan faalt de poort dicht |
 | `aud` | precies de canonieke URL van de poort |
-| `iat` | aanwezig, een getal (`NumericDate`, RFC 7519 §2; een string, boolean of niet-eindige waarde is `assertie_ongeldig`); niet meer dan `max_skew` (5 s) in de toekomst |
+| `iat` | aanwezig, een getal (`NumericDate`, RFC 7519 §2; een string, boolean, niet-eindige waarde of een getal buiten het bereik van een float, zoals `1e400`, is `assertie_ongeldig`); niet meer dan `max_skew` (5 s) in de toekomst |
 | `exp` | aanwezig, een getal zoals `iat`; `0 < exp - iat ≤ 60` (nominale looptijd); `exp > nu - max_skew` |
 | `jti` | aanwezig, 16 tot 128 tekens; `(sub, jti)` wordt ná een geslaagde verificatie atomair gereserveerd in SQLite (`INSERT` met unieke sleutel); een tweede verzoek met dezelfde `jti`, ook gelijktijdig, krijgt `401 assertie_hergebruikt`. Reserveringen overleven een herstart van de poort en worden opgeruimd als `exp + max_skew` voorbij is |
-| Handtekening | ES256 met de P-256-sleutel uit `publiekeSleutel`. Het register bouwt die sleutel al bij provisioning op en weigert (`400 invalidValue`) een JWK met ander `kty`/`crv`, een privé-onderdeel, `x` of `y` die geen base64url-string van 32 bytes zijn of samen geen punt op de kromme vormen, en een `alg` of `use` anders dan `ES256` en `sig` |
+| Handtekening | ES256 met de P-256-sleutel uit `publiekeSleutel`. Het register bouwt die sleutel al bij provisioning op en weigert (`400 invalidValue`) een JWK met ander `kty`/`crv`, een privé-onderdeel, `x` of `y` die geen canonieke base64url-string zonder padding van precies 32 bytes zijn (43 tekens uit het base64url-alfabet; de decoder van PyJWT slaat andere tekens en padding stil over, dus het register toetst de vorm zelf) of samen geen punt op de kromme vormen, en een `alg` of `use` anders dan `ES256` en `sig` |
 | Tijd | asserties worden tegen de echte klok van de poort gecontroleerd, niet tegen de demoklok (4.8) |
 
 Gestolen asserties zijn één keer bruikbaar, met een nominale looptijd van hoogstens 60 s; met de
@@ -458,7 +477,9 @@ Elke `tools/call` doorloopt, in deze volgorde, en de eerste weigering bepaalt de
 
 Overgeslagen stappen staan in het record als `niet_uitgevoerd`. De stap `logboek` staat in elk
 vastgelegd `tools/call`-record op `ok`, ook als een eerdere stap weigerde: het vastleggen van het
-besluit is die stap. Het register controleert elk toolcall-record tegen dit schema (bekende velden,
+besluit is die stap. De enige uitzondering is de `409` hierboven: dan legt het register het record
+vast met `controles.logboek` op `geweigerd`, omdat de toelating op het definitieve moment niet meer
+gold. Het register controleert elk toolcall-record tegen dit schema (bekende velden,
 een uitkomst per stap, `toegestaan` alleen met `ok` bij alle vijf) en zet de tijd zelf. Een record `toegestaan` bewijst de
 toelating op dat moment, niet dat de tool is voltooid; neveneffecten (welke notities bestaan, welke
 dossierinhoud is teruggegeven) worden in demo en tests afzonderlijk gecontroleerd.
@@ -506,7 +527,7 @@ van de tabel opvalt. Dit is het ontwerp uit agent-mandaat, hier met drie soorten
 
 | `soort` | Geschreven door | Velden |
 |---|---|---|
-| `levenscyclus` | register | `gebeurtenis` (aangemaakt, bevestigd, herbeoordeling_vereist, gedeactiveerd, verlopen, gewijzigd, verwijderd, noodstop, heractiveerd, tuples_niet_gesynchroniseerd), `agent`, `agent_naam`, `eigenaar`, `eigenaar_naam`, `actor` (bron, beheerder, eigenaar, controle), `reden`, `status`, `van` (vorige status); bij `bevestigd` ook `bevestigdeVersie` en `configuratie` (4.2) |
+| `levenscyclus` | register | `gebeurtenis` (bevestigd, herbeoordeling_vereist, gedeactiveerd, verlopen, verwijderd, tuples_niet_gesynchroniseerd, demoklok_vooruit), `agent`, `agent_naam`, `eigenaar`, `eigenaar_naam`, `actor` (bron, beheerder, eigenaar, controle, of register voor een tijdregel die het register vóór een gebeurtenis vastlegt), `reden`, `status`, bij een statusovergang `van` (vorige status); bij `bevestigd` ook `bevestigdeVersie` en `configuratie` (4.2). Aanmaak, noodstop en heractivering zijn statusovergangen; de `reden` onderscheidt ze (`wacht_op_eigenaar`, `uitgeschakeld_door_beheerder`, `heractiveerd_door_beheerder`). Een `tuples_niet_gesynchroniseerd` voor de teamrelaties draagt `medewerkers` (lijst van SCIM-id's) in plaats van de agentvelden; `demoklok_vooruit` heeft alleen `actor` en in `reden` de duur |
 | `scim` | register | `actor`, `operatie`, `resource`, `uitkomst` (ook geweigerde pogingen, zoals de bron die een agent aanmaakt) |
 | `toolcall` | poort via `POST /logboek` | `agent`, `agent_naam`, `eigenaar_naam`, `tool`, `dossier`, `beslissing`, `reden` (bij weigering, waaronder `toestand_gewijzigd` als het register de toelating onder het slot afwijst), `toelichting` (de concrete oorzaak bij `toestand_gewijzigd`), `controles` (uitkomst per stap of `niet_uitgevoerd`), `recordversie`, `jti` |
 

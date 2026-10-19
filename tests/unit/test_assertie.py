@@ -146,8 +146,18 @@ def test_aud_als_lijst_geweigerd(paar: Sleutelpaar) -> None:
         ("iat", lambda _: True),
         ("exp", lambda _: math.inf),
         ("iat", lambda _: math.nan),
+        ("exp", lambda _: 10**400),
+        ("iat", lambda _: -(10**400)),
     ],
-    ids=["iat-string", "exp-string", "iat-bool", "exp-oneindig", "iat-nan"],
+    ids=[
+        "iat-string",
+        "exp-string",
+        "iat-bool",
+        "exp-oneindig",
+        "iat-nan",
+        "exp-groot",
+        "iat-klein",
+    ],
 )
 def test_tijdclaims_moeten_getallen_zijn(
     paar: Sleutelpaar, naam: str, waarde: Callable[[int], Any]
@@ -165,20 +175,56 @@ def _b64url(gegevens: bytes) -> str:
     ("afwijking", "melding"),
     [
         ({"x": 1, "y": 2}, "base64url"),
-        ({"x": "!!!", "y": "???"}, "geen geldige P-256"),
-        ({"x": _b64url(b"\x01" * 16)}, "geen geldige P-256"),
+        ({"x": "!!!", "y": "???"}, "base64url"),
+        ({"x": _b64url(b"\x01" * 16)}, "base64url"),
+        ({"x": _b64url(b"\x01" * 33)}, "base64url"),
         ({"y": _b64url(b"\x01" * 32)}, "geen geldige P-256"),
         ({"alg": "RS256"}, "alg ES256"),
         ({"use": "enc"}, "use sig"),
         ({"d": _b64url(b"\x01" * 32)}, "privé"),
     ],
-    ids=["numeriek", "geen-base64url", "te-kort", "niet-op-de-kromme", "alg", "use", "privé"],
+    ids=[
+        "numeriek",
+        "geen-base64url",
+        "te-kort",
+        "te-lang",
+        "niet-op-de-kromme",
+        "alg",
+        "use",
+        "privé",
+    ],
 )
 def test_onbruikbare_jwk_geweigerd(
     paar: Sleutelpaar, afwijking: dict[str, Any], melding: str
 ) -> None:
     jwk = {**json.loads(paar.publieke_jwk()), **afwijking}
     with pytest.raises(ValueError, match=melding):
+        controleer_jwk(json.dumps(jwk))
+
+
+_ALFABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+@pytest.mark.parametrize(
+    "vervalsing",
+    [
+        lambda x: "é" + x,
+        lambda x: x + "=",
+        lambda x: x[:20] + "\n" + x[20:],
+        lambda x: x.replace("-", "+").replace("_", "/"),
+        lambda x: x[:-1] + _ALFABET[_ALFABET.index(x[-1]) ^ 1],
+    ],
+    ids=["niet-ascii", "padding", "regeleinde", "standaard-base64", "niet-canoniek"],
+)
+def test_jwk_coordinaat_alleen_in_canonieke_base64url(
+    paar: Sleutelpaar, vervalsing: Callable[[str], str]
+) -> None:
+    # PyJWT decodeert al deze varianten naar dezelfde 32 bytes; het profiel kent één vorm.
+    jwk = json.loads(paar.publieke_jwk())
+    if vervalsing(jwk["x"]) == jwk["x"]:
+        jwk["x"] = _b64url(b"\xfb" * 32)  # bevat zeker '-' of '_', zodat de variant verschilt
+    jwk["x"] = vervalsing(jwk["x"])
+    with pytest.raises(ValueError, match="base64url"):
         controleer_jwk(json.dumps(jwk))
 
 
