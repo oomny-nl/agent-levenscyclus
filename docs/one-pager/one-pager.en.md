@@ -9,7 +9,7 @@ lang: en
 
 **Joiner-mover-leaver, recertification and ownership for an AI agent in government.**
 
-Michael Owen Meijer, Oomny B.V. · identity architect and AI engineer for government and cloud
+Michael Owen Meijer, Oomny B.V. · senior identity architect and AI engineer for government and cloud
 
 ## The problem
 
@@ -27,7 +27,7 @@ An agent goes through the same governance process as an employee:
   an expiry date and a risk class. Until the owner confirms it, the agent does nothing.
 - **Mover.** The agent inherits its access from its owner's teams (agent → owner → team → case file
   in OpenFGA). When the owner changes teams, the agent is refused until a new confirmation, and its
-  access then follows the new team. Nobody changes anything per agent.
+  access then follows the new team. Nobody has to adjust access for each agent by hand.
 - **Leaver.** When the owner leaves, the agent is deactivated and refused on its next tool call,
   even in the middle of a task. Its registration and audit trail are kept.
 - **Recertification with a hard deadline.** The owner confirms the agent periodically. If that does
@@ -47,7 +47,7 @@ from the log, a check of chain and anchor, and a tampering test.
 
 236 unit tests, 36 integration tests against the real stack and model tests for OpenFGA. A threat
 model against the OWASP Top 10 for Agentic Applications 2026 and the OWASP Non-Human Identities Top
-10, with the test behind each control. An honest section on what this does not solve.
+10, with the status and tests for each risk. An honest section on what this does not solve.
 
 ## Why me
 
@@ -55,6 +55,6 @@ Identity and security since 2011, nearly eight years for the four largest Dutch 
 identity synchronisation with MIM, SCIM provisioning from the municipalities, PIM with access
 reviews in Entra ID, and setting up Keycloak (cutover in preparation). Since 2026 I have been
 building AI agents with tool calling and MCP. For employees this governance process has been routine
-for years; for agents it is only starting.
+for years; this demo applies it to AI agents.
 
 **Repo:** github.com/oomny-nl/agent-levenscyclus · **Site:** www.oomny.nl · **Mail:** michael@oomny.nl

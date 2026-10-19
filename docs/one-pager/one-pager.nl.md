@@ -9,7 +9,7 @@ lang: nl
 
 **Joiner-mover-leaver, recertificering en eigenaarschap voor een AI-agent bij de overheid.**
 
-Michael Owen Meijer, Oomny B.V. · identity-architect en AI-engineer voor overheid en cloud
+Michael Owen Meijer, Oomny B.V. · senior identity-architect en AI-engineer voor overheid en cloud
 
 ## Het probleem
 
@@ -47,14 +47,14 @@ bewijstabel uit het logboek, een controle van keten en anker, en een manipulatie
 
 236 unittests, 36 integratietests tegen de echte keten en modeltests voor OpenFGA. Een
 dreigingsmodel tegen de OWASP Top 10 for Agentic Applications 2026 en de OWASP Non-Human Identities
-Top 10, met per risico de test die het bewijst. Een eerlijke paragraaf over wat dit niet oplost.
+Top 10, met per risico de status en de tests. Een eerlijke paragraaf over wat dit niet oplost.
 
 ## Waarom van mij
 
 Identity en security sinds 2011, bijna acht jaar voor de vier grote gemeenten:
 identiteitensynchronisatie met MIM, SCIM-provisioning vanuit de gemeenten, PIM met access reviews in
 Entra ID, en de inrichting van Keycloak (cutover in voorbereiding). Sinds 2026 bouw ik AI-agents met
-tool calling en MCP. Voor medewerkers is dit governanceproces al jaren gewoon; voor agents begint
-het nu.
+tool calling en MCP. Voor medewerkers is dit governanceproces al jaren gewoon; deze demo past het
+toe op AI-agents.
 
 **Repo:** github.com/oomny-nl/agent-levenscyclus · **Site:** www.oomny.nl · **Mail:** michael@oomny.nl
