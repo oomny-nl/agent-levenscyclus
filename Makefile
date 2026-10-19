@@ -55,13 +55,13 @@ integratie: .env
 
 ## test: unittests op de host
 test:
-	uv run pytest -m "not integratie"
+	uv run --all-extras pytest -m "not integratie"
 
 ## lint: ruff, opmaak en typecontrole
 lint:
-	uv run ruff check .
-	uv run ruff format --check .
-	uv run ty check src tests
+	uv run --all-extras ruff check .
+	uv run --all-extras ruff format --check .
+	uv run --all-extras ty check src tests
 
 ## model: OpenFGA-modeltests en controle dat model.json bij model.fga hoort
 model:
