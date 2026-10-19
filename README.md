@@ -2,20 +2,43 @@
 
 [English](README.en.md)
 
-Een AI-agent is een identiteit met een eigenaar en een houdbaarheidsdatum. Deze repo laat zien dat
-je een agent dezelfde levenscycluszorg kunt geven als een medewerker: hij wordt geprovisioneerd met
-een menselijke eigenaar, een doel, een vervaldatum en een risicoklasse. Hij bestaat alleen zolang
-zijn eigenaar hem bevestigt en volgt zijn eigenaar bij een functiewissel. Vertrekt de eigenaar,
-dan wordt de agent gedeactiveerd en verliest hij zijn toegang; zijn registratie en het auditspoor
-blijven bewaard. Alles wat hij doet en alles wat met hem gebeurt, staat in één controleerbaar
-logboek.
+## In één minuut
 
-Het scenario speelt bij de fictieve gemeente Lindevoort. Alle namen, dossiers en inhoud zijn
-verzonnen.
+**Probleem.** Wie is eigenaar van deze agent, mag hij nog bestaan, en wat gebeurt er als zijn
+maker vertrekt? Voor medewerkers regelt identity governance (IGA) dat met joiner-mover-leaver en
+recertificering. Een agent met een gedeeld serviceaccount of een losse API-sleutel valt daarbuiten.
+
+**Wat de demo bewijst.** Een agent heeft altijd een menselijke eigenaar en doet niets zonder diens
+bevestiging. Wisselt de eigenaar van team, dan krijgt de agent pas na een nieuwe bevestiging de
+toegang van het nieuwe team. Vertrekt de eigenaar, dan wordt de agent bij de volgende toolcall
+geweigerd, ook midden in een opdracht. Na de vervaldatum weigeren poort en OpenFGA hem allebei.
+
+**Wat het oplevert.** Agents in hetzelfde governanceproces als medewerkers: provisioning via SCIM
+2.0, recertificering met een harde termijn, autorisatie via relaties in OpenFGA en één geketend
+logboek dat een auditor kan nalopen.
 
 ![Demo-opname: joiner, prompt-injectie geweigerd, mover, leaver en verlopen agent, met het geketende logboek als bewijs](docs/beeld/demo.gif)
 
-De opname toont `make speel` op een gestarte keten (`make demo` doet `make up` en `make speel` in één keer): vijf scenario's tegen de echte keten en daarna het logboek als bewijs. Opnieuw opnemen: `make opname` (vereist [VHS](https://github.com/charmbracelet/vhs) en ffmpeg).
+Achter deze repo zit bijna acht jaar identitywerk voor de vier grote gemeenten: federatie,
+SCIM-provisioning en de inrichting van Keycloak. Michael Owen Meijer ([Oomny B.V.](https://www.oomny.nl))
+trekt dat werk in [drie demo's](https://github.com/oomny-nl) door naar AI-agents.
+
+## Identity governance voor agents
+
+Deze repo geeft een AI-agent dezelfde identity governance als een medewerker: joiner-mover-leaver,
+recertificering en eigenaarschap. Een nieuwe agent (joiner) wordt via SCIM geprovisioneerd met een
+menselijke eigenaar, een doel, een vervaldatum en een risicoklasse. De eigenaar recertificeert hem
+periodiek en na elke teamwissel; zonder die bevestiging (in de code: herbeoordeling) doet de agent
+niets. Wisselt de eigenaar van team (mover), dan volgt de toegang van de agent het nieuwe team.
+Vertrekt de eigenaar (leaver), dan wordt de agent gedeactiveerd en verliest hij zijn toegang; zijn
+registratie en het auditspoor blijven bewaard. Alles wat hij doet en alles wat met hem gebeurt,
+staat in één controleerbaar logboek.
+
+Het scenario speelt bij de fictieve gemeente Lindevoort. Alle namen, dossiers en inhoud zijn
+verzonnen. De opname bovenaan toont `make speel` op een gestarte keten (`make demo` doet `make up`
+en `make speel` in één keer): vijf scenario's tegen de echte keten en daarna het logboek als
+bewijs. Opnieuw opnemen: `make opname` (vereist [VHS](https://github.com/charmbracelet/vhs) en
+ffmpeg).
 
 ## Wat dit bewijst
 
