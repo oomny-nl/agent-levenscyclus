@@ -53,8 +53,8 @@ Top 10, met per risico de status en de tests. Een eerlijke paragraaf over wat di
 
 Identity en security sinds 2011, bijna acht jaar voor de vier grote gemeenten:
 identiteitensynchronisatie met MIM, SCIM-provisioning vanuit de gemeenten, PIM met access reviews in
-Entra ID, en de inrichting van Keycloak (cutover in voorbereiding). Sinds 2026 bouw ik AI-agents met
-tool calling en MCP. Voor medewerkers is dit governanceproces al jaren gewoon; deze demo past het
-toe op AI-agents.
+Entra ID, en Keycloak als opvolger van Azure AD B2C (API-toegang sinds oktober 2026 in productie).
+Sinds 2026 bouw ik AI-agents met tool calling en MCP. Voor medewerkers is dit governanceproces al
+jaren gewoon; deze demo past het toe op AI-agents.
 
 **Repo:** github.com/oomny-nl/agent-levenscyclus · **Site:** www.oomny.nl · **Mail:** michael@oomny.nl

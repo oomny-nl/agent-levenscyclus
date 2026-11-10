@@ -53,8 +53,8 @@ model against the OWASP Top 10 for Agentic Applications 2026 and the OWASP Non-H
 
 Identity and security since 2011, nearly eight years for the four largest Dutch municipalities:
 identity synchronisation with MIM, SCIM provisioning from the municipalities, PIM with access
-reviews in Entra ID, and setting up Keycloak (cutover in preparation). Since 2026 I have been
-building AI agents with tool calling and MCP. For employees this governance process has been routine
-for years; this demo applies it to AI agents.
+reviews in Entra ID, and Keycloak as the successor to Azure AD B2C (API access in production since
+October 2026). Since 2026 I have been building AI agents with tool calling and MCP. For employees
+this governance process has been routine for years; this demo applies it to AI agents.
 
 **Repo:** github.com/oomny-nl/agent-levenscyclus · **Site:** www.oomny.nl · **Mail:** michael@oomny.nl
