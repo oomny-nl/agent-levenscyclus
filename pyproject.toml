@@ -7,22 +7,22 @@ license = "EUPL-1.2"
 authors = [{ name = "Michael Owen Meijer", email = "michael@oomny.nl" }]
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "fastapi==0.143.3",
+    "fastapi==0.162.0",
     "uvicorn==0.54.0",
     "mcp==2.3.0",
-    "httpx2==2.13.1",
+    "httpx2==2.16.0",
     "openfga-sdk==0.10.5",
     "aiohttp==3.14.5",
-    "langgraph==1.2.16",
-    "langchain-core==1.6.12",
+    "langgraph==1.2.19",
+    "langchain-core==1.7.4",
     "pyjwt[crypto]==2.15.1",
     "cryptography==50.0.2",
-    "pydantic==2.14.1",
+    "pydantic==2.14.2",
     "rich==15.0.0",
 ]
 
 [project.optional-dependencies]
-llm = ["langchain-openai==1.7.2"]
+llm = ["langchain-openai==1.7.3"]
 
 [project.scripts]
 levenscyclus-register = "levenscyclus.register.app:main"
@@ -32,15 +32,15 @@ levenscyclus-demo = "levenscyclus.demo:main"
 
 [dependency-groups]
 dev = [
-    "pytest==9.1.1",
-    "pytest-asyncio==1.4.0",
+    "pytest==9.2.0",
+    "pytest-asyncio==1.4.1.post1",
     "pyyaml==6.0.3",
-    "ruff==0.17.1",
-    "ty==0.0.89",
+    "ruff==0.17.3",
+    "ty==0.0.97",
 ]
 
 [build-system]
-requires = ["hatchling==1.32.4"]
+requires = ["hatchling==1.33.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
